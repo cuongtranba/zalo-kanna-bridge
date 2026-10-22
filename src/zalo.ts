@@ -145,6 +145,14 @@ export async function zaloCall(
   return parsed
 }
 
+export async function fetchBotDisplayName(options: ZaloClientOptions): Promise<string> {
+  const response = await zaloCall(options, "getMe", {})
+  const result = objectField(response, "result")
+  const name = result === undefined ? undefined : stringField(result, "display_name")
+  if (name === undefined || name.trim() === "") throw new ZaloRequestError("Zalo getMe returned no display_name")
+  return name.trim()
+}
+
 export function createZaloApi(options: ZaloClientOptions): ZaloApi {
   return {
     async sendText(chatId, text) {

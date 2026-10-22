@@ -1,6 +1,6 @@
 import { createAdminOps } from "./admin"
 import { resolvePending, describePending, type Decision } from "./approvals"
-import { ADMIN_COMMANDS, helpText, parseCommand, type ParsedCommand } from "./commands"
+import { ADMIN_COMMANDS, helpText, parseCommand, stripBotMention, type ParsedCommand } from "./commands"
 import type { Config } from "./config"
 import { extractDirectives, runDirective } from "./directives"
 import { errorMessage, isJsonObject, parseJson } from "./json"
@@ -16,7 +16,7 @@ export type { Logger } from "./log"
 export type BridgeConfig = Pick<
   Config,
   "webhookSecret" | "webhookPath" | "superadminIds" | "kannaDefaultDir" | "userDirRoot" | "turnDeadlineSeconds"
->
+> & { botDisplayName?: string | undefined }
 
 export interface BridgeDeps {
   config: BridgeConfig
@@ -56,12 +56,19 @@ const KNOWN_USERS_IN_PREAMBLE = 20
 const MCP_REPLY_LIMIT = 6000
 
 type Role = "superadmin" | "user"
+type ChatKind = "PRIVATE" | "GROUP" | "unknown"
+
+function chatKind(chatType: string | undefined): ChatKind {
+  const upper = chatType?.toUpperCase()
+  return upper === "PRIVATE" || upper === "GROUP" ? upper : "unknown"
+}
 
 interface Participant {
   role: Role
   fromId: string
   name: string
   chatId: string
+  chatType: ChatKind
   convKey: string
 }
 
@@ -363,8 +370,14 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
   }
 
-  async function handleKnownText(who: Participant, messageId: string, text: string): Promise<void> {
+  async function handleKnownText(who: Participant, messageId: string, rawText: string): Promise<void> {
+    const stripped = stripBotMention(rawText, config.botDisplayName)
+    const text = stripped === "" ? "/help" : stripped
     const command = parseCommand(text)
+    log.info(
+      `message from ${who.fromId} (${who.name}) role=${who.role} chat=${who.chatType} ` +
+        `kind=${command === undefined ? "text" : `/${command.name}`}`,
+    )
     if (command !== undefined) {
       let reply: string
       try {
@@ -393,7 +406,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
         ...(lastReplied === undefined ? {} : { lastReplied }),
       }),
     )
-    if (shouldReply) await say(message.chatId, MESSAGES.noAccess(message.fromId))
+    if (shouldReply) {
+      log.info(
+        `message from ${message.fromId} (${message.displayName}) role=unknown chat=${chatKind(message.chatType)} kind=text`,
+      )
+      await say(message.chatId, MESSAGES.noAccess(message.fromId))
+    }
   }
 
   async function handleMessage(update: ZaloUpdate): Promise<void> {
@@ -408,9 +426,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
       fromId: message.fromId,
       name: message.displayName,
       chatId: message.chatId,
+      chatType: chatKind(message.chatType),
       convKey: conversationKey(message.chatId, message.fromId),
     }
-    if (sender.role === "superadmin" && message.chatType?.toUpperCase() === "PRIVATE") {
+    if (sender.role === "superadmin" && who.chatType === "PRIVATE") {
       await remember("admin chat", store.updateAdmin(message.fromId, { chatId: message.chatId }))
     }
     if (eventName !== TEXT_EVENT) {

@@ -16,6 +16,12 @@ export const ADMIN_COMMANDS: ReadonlySet<string> = new Set([
 
 const SHARED_COMMANDS: ReadonlySet<string> = new Set(["help", "whoami", "new"])
 
+export function stripBotMention(text: string, botDisplayName: string | undefined): string {
+  if (botDisplayName === undefined || botDisplayName === "") return text.trim()
+  const escaped = `@${botDisplayName}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return text.replace(new RegExp(`[ \\t]*${escaped}[ \\t]*`, "giu"), " ").trim()
+}
+
 export function parseCommand(text: string): ParsedCommand | undefined {
   const trimmed = text.trim()
   if (!trimmed.startsWith("/")) return undefined
