@@ -26,6 +26,7 @@ export type BridgeConfig = Pick<
   | "progressUpdateSeconds"
   | "progressTypingSeconds"
   | "progressAck"
+  | "sessionIdleMinutes"
 > & { botDisplayName?: string | undefined }
 
 export interface Scheduler {
@@ -60,6 +61,13 @@ const STATUS_TOOL_LIMIT = 5
 const NO_ACCESS_REPLY_INTERVAL_MS = 24 * 60 * 60 * 1000
 const KNOWN_USERS_IN_PREAMBLE = 20
 const MCP_REPLY_LIMIT = 6000
+const MINUTE_MS = 60 * 1000
+
+interface TurnOpening {
+  ack: boolean
+  notice?: string
+  tip?: boolean
+}
 
 type Role = "superadmin" | "user"
 type ChatKind = "PRIVATE" | "GROUP" | "unknown"
@@ -269,10 +277,31 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
     if (!sent.ok) return { kind: "kanna_error", error: sent.error }
 
-    if (sent.value.chatId !== mapped) {
-      await remember("conversation mapping", store.setConversation(who.convKey, { kannaChatId: sent.value.chatId, projectId }))
-    }
+    await remember(
+      "conversation mapping",
+      store.setConversation(who.convKey, { kannaChatId: sent.value.chatId, projectId, lastActiveAt: now() }),
+    )
     return followTurn(who, sent.value, progress)
+  }
+
+  async function touchConversation(convKey: string): Promise<void> {
+    const stored = store.getConversation(convKey)
+    if (stored === undefined) return
+    await remember("conversation activity", store.setConversation(convKey, { ...stored, lastActiveAt: now() }))
+  }
+
+  function isIdle(convKey: string): boolean {
+    const idleAfterMs = config.sessionIdleMinutes * MINUTE_MS
+    if (idleAfterMs === 0 || waiting.has(convKey)) return false
+    const lastActiveAt = store.getConversation(convKey)?.lastActiveAt
+    return lastActiveAt !== undefined && now() - lastActiveAt >= idleAfterMs
+  }
+
+  async function openingFor(who: Participant): Promise<TurnOpening> {
+    if (store.getConversation(who.convKey) === undefined) return { ack: true, tip: true }
+    if (!isIdle(who.convKey)) return { ack: true }
+    await remember("conversation reset", store.deleteConversation(who.convKey))
+    return { ack: true, notice: messages.newSessionAfterIdle }
   }
 
   async function notifyAdmins(who: Participant, details: string): Promise<void> {
@@ -342,12 +371,15 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   async function followWithTyping(
     who: Participant,
-    options: { ack: boolean },
+    options: TurnOpening,
     progress: TurnProgress,
     start: () => Promise<Turn>,
   ): Promise<Turn> {
     await typing(who.chatId)
-    if (options.ack && config.progressAck) await sayDuringTurn(who, progress, messages.received)
+    const acknowledgement =
+      options.ack && config.progressAck ? joinParagraphs([messages.received, options.tip ? messages.newConversationTip : ""]) : ""
+    const opening = joinParagraphs([options.notice ?? "", acknowledgement])
+    if (opening !== "") await sayDuringTurn(who, progress, opening)
     const stopTyping = scheduler.every(config.progressTypingSeconds * 1000, () => void typing(who.chatId))
     try {
       return await start()
@@ -358,7 +390,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   async function followAndDeliver(
     who: Participant,
-    options: { ack: boolean },
+    options: TurnOpening,
     start: (progress: TurnProgress) => Promise<Turn>,
   ): Promise<void> {
     const progress: TurnProgress = { lastSentAt: now(), answeredInPieces: false, tools: [] }
@@ -370,6 +402,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await say(who.chatId, messages.unreachable)
       return
     }
+    await touchConversation(who.convKey)
     await deliver(who, turn, progress)
   }
 
@@ -494,7 +527,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await say(who.chatId, reply)
       return
     }
-    await followAndDeliver(who, { ack: true }, (progress) => runTurn(who, messageId, text, progress))
+    const opening = await openingFor(who)
+    await followAndDeliver(who, opening, (progress) => runTurn(who, messageId, text, progress))
   }
 
   async function handleUnknown(message: ZaloMessage): Promise<void> {

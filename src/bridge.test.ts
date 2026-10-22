@@ -185,6 +185,7 @@ interface BridgeOptions {
   messages?: Messages
   scheduler?: Scheduler
   ack?: boolean
+  idleMinutes?: number
 }
 
 function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: BridgeOptions = {}): Bridge {
@@ -200,6 +201,7 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: B
       progressUpdateSeconds: 60,
       progressTypingSeconds: 5,
       progressAck: options.ack ?? false,
+      sessionIdleMinutes: options.idleMinutes ?? 30,
       botDisplayName: BOT_NAME,
     },
     kanna,
@@ -702,7 +704,7 @@ test("a message for Kanna shows typing and an acknowledgement before Kanna repli
 
   expect(timeline).toEqual([
     "typing",
-    `text:${MESSAGES.received}`,
+    `text:${MESSAGES.received}\n\n${MESSAGES.newConversationTip}`,
     "kanna:send",
     "kanna:wait",
     "typing",
@@ -828,4 +830,90 @@ test("slash commands get neither a typing indicator nor an acknowledgement", asy
   expect(zalo.typing).toEqual([])
   expect(zalo.sent).toHaveLength(1)
   expect(zalo.sent[0]?.text).toContain("Role: superadmin")
+})
+
+const MINUTE_MS = 60 * 1000
+
+test("a message after the idle gap opens a new Kanna chat and tells the user, while messages inside the gap keep the same chat", async () => {
+  let clock = 1_000_000
+  const kanna = createFakeKanna()
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { now: () => clock, idleMinutes: 30 })
+
+  await say(bridge, { text: "first" })
+  clock += 29 * MINUTE_MS
+  await say(bridge, { text: "second" })
+  clock += 30 * MINUTE_MS
+  await say(bridge, { text: "third" })
+
+  expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([
+    [`project:${DEFAULT_DIR}`, undefined],
+    [undefined, "kanna-chat-1"],
+    [`project:${DEFAULT_DIR}`, undefined],
+  ])
+  expect(zalo.sent.map((message) => message.text)).toEqual([
+    "echo: first",
+    "echo: second",
+    MESSAGES.newSessionAfterIdle,
+    "echo: third",
+  ])
+})
+
+test("idle time is measured from the end of a long turn, not from when its message was accepted", async () => {
+  let clock = 1_000_000
+  const kanna = createFakeKanna({
+    send: (args, openedChats) =>
+      kannaResult({ chatId: args.chatId ?? `kanna-chat-${openedChats}`, done: false, status: "running", cursor: 2 }),
+    wait: (args) => {
+      clock += 40 * MINUTE_MS
+      return kannaResult({ chatId: args.chatId, assistantText: "finally" })
+    },
+  })
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { now: () => clock, idleMinutes: 30 })
+
+  await say(bridge, { text: "slow job" })
+  clock += 5 * MINUTE_MS
+  await say(bridge, { text: "next" })
+
+  expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([
+    [`project:${DEFAULT_DIR}`, undefined],
+    [undefined, "kanna-chat-1"],
+  ])
+  expect(textsTo(zalo, "zalo-chat-1")).not.toContain(MESSAGES.newSessionAfterIdle)
+})
+
+test("SESSION_IDLE_MINUTES=0 never starts a new session however long the gap", async () => {
+  let clock = 1_000_000
+  const kanna = createFakeKanna()
+  const bridge = newBridge(kanna, createFakeZalo(), await newStateFile(), { now: () => clock, idleMinutes: 0 })
+
+  await say(bridge, { text: "first" })
+  clock += 100 * DAY_MS
+  await say(bridge, { text: "much later" })
+
+  expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([
+    [`project:${DEFAULT_DIR}`, undefined],
+    [undefined, "kanna-chat-1"],
+  ])
+})
+
+test("a conversation saved before idle tracking existed is continued, not reset, on the next message", async () => {
+  const stateFile = await newStateFile()
+  await mkdir(join(stateFile, ".."), { recursive: true })
+  await writeFile(
+    stateFile,
+    JSON.stringify({
+      version: 2,
+      conversations: { [`zalo-chat-1:${ADMIN}`]: { kannaChatId: "old-chat", projectId: `project:${DEFAULT_DIR}` } },
+    }),
+  )
+  const kanna = createFakeKanna()
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, stateFile, { now: () => 5_000_000_000_000, idleMinutes: 30 })
+
+  await say(bridge, { text: "after the deploy" })
+
+  expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([[undefined, "old-chat"]])
+  expect(textsTo(zalo, "zalo-chat-1")).toEqual(["echo: after the deploy"])
 })
