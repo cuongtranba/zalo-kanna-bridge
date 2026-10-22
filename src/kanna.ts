@@ -13,12 +13,18 @@ import {
 
 export type ChatStatus = "idle" | "starting" | "running" | "waiting_for_user" | "failed" | null
 
+export interface ActivityEntry {
+  kind: string
+  toolName?: string
+}
+
 export interface KannaResult {
   chatId: string
   status: ChatStatus
   busy: boolean
   done: boolean
   assistantText: string
+  activity: ActivityEntry[]
   cursor: number
   timedOut: boolean
   duplicate: boolean
@@ -95,6 +101,16 @@ function parseStatus(value: JsonValue | undefined): ChatStatus | undefined {
   }
 }
 
+function parseActivity(value: JsonObject): ActivityEntry[] {
+  const entries: ActivityEntry[] = []
+  for (const item of arrayField(value, "activity") ?? []) {
+    if (!isJsonObject(item)) continue
+    const toolName = stringField(item, "toolName")
+    entries.push({ kind: stringField(item, "kind") ?? "", ...(toolName === undefined ? {} : { toolName }) })
+  }
+  return entries
+}
+
 export function parseKannaResult(value: JsonValue): KannaResult | undefined {
   if (!isJsonObject(value)) return undefined
   const chatId = stringField(value, "chatId")
@@ -110,6 +126,7 @@ export function parseKannaResult(value: JsonValue): KannaResult | undefined {
     busy: booleanField(value, "busy") ?? false,
     done,
     assistantText,
+    activity: parseActivity(value),
     cursor,
     timedOut: booleanField(value, "timedOut") ?? false,
     duplicate: booleanField(value, "duplicate") ?? false,

@@ -2,6 +2,7 @@ import { createBridge } from "./bridge"
 import { ConfigError, parseConfig } from "./config"
 import { errorMessage } from "./json"
 import { createKannaMcpApi } from "./kanna"
+import { messagesFor } from "./messages"
 import { createFileStore } from "./state"
 import { createZaloApi, fetchBotDisplayName } from "./zalo"
 
@@ -33,6 +34,7 @@ const bridge = createBridge({
   kanna: createKannaMcpApi({ url: config.kannaMcpUrl, password: config.kannaPassword }),
   zalo: createZaloApi({ token: config.zaloBotToken }),
   store: createFileStore(config.stateFile),
+  messages: messagesFor(config.language),
 })
 
 const server = Bun.serve({ port: config.port, fetch: (request) => bridge.fetch(request) })

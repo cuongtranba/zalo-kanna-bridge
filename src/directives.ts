@@ -1,12 +1,15 @@
 import type { AdminOps, OpResult } from "./admin"
 import { isJsonObject, parseJson, stringField } from "./json"
+import type { Messages } from "./messages"
 
 export type Directive =
   | { action: "assign"; userId: string; dir: string }
   | { action: "unassign"; userId: string }
   | { action: "set_dir"; dir: string }
 
-export type ParsedDirective = { ok: true; directive: Directive } | { ok: false; error: string }
+export type DirectiveError = { kind: "not_json" } | { kind: "unknown"; action: string | undefined }
+
+export type ParsedDirective = { ok: true; directive: Directive } | { ok: false; error: DirectiveError }
 
 export const DIRECTIVE_PREFIX = "ZALO_BRIDGE_ACTION"
 
@@ -14,7 +17,7 @@ const DIRECTIVE_LINE = /^\s*ZALO_BRIDGE_ACTION\s+(\{.*\})\s*$/
 
 function parseDirective(json: string): ParsedDirective {
   const parsed = parseJson(json)
-  if (parsed === undefined || !isJsonObject(parsed)) return { ok: false, error: "the action is not valid JSON" }
+  if (parsed === undefined || !isJsonObject(parsed)) return { ok: false, error: { kind: "not_json" } }
   const action = stringField(parsed, "action")
   const userId = stringField(parsed, "userId")
   const dir = stringField(parsed, "dir")
@@ -23,7 +26,7 @@ function parseDirective(json: string): ParsedDirective {
   }
   if (action === "unassign" && userId !== undefined) return { ok: true, directive: { action, userId } }
   if (action === "set_dir" && dir !== undefined) return { ok: true, directive: { action, dir } }
-  return { ok: false, error: `unknown action or missing fields (${action ?? "no action"})` }
+  return { ok: false, error: { kind: "unknown", action } }
 }
 
 export function extractDirectives(text: string): { text: string; directives: ParsedDirective[] } {
@@ -40,8 +43,17 @@ export function extractDirectives(text: string): { text: string; directives: Par
   return { text: kept.join("\n").trim(), directives }
 }
 
-export async function runDirective(ops: AdminOps, adminId: string, parsed: ParsedDirective): Promise<OpResult> {
-  if (!parsed.ok) return { ok: false, text: `Ignored an invalid ${DIRECTIVE_PREFIX}: ${parsed.error}.` }
+export async function runDirective(
+  ops: AdminOps,
+  messages: Messages,
+  adminId: string,
+  parsed: ParsedDirective,
+): Promise<OpResult> {
+  if (!parsed.ok) {
+    const reason =
+      parsed.error.kind === "not_json" ? messages.directiveNotJson : messages.directiveUnknown(parsed.error.action)
+    return { ok: false, text: messages.directiveIgnored(reason) }
+  }
   const { directive } = parsed
   switch (directive.action) {
     case "assign":

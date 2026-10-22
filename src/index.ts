@@ -1,9 +1,12 @@
-export { createBridge, MESSAGES } from "./bridge"
-export type { Bridge, BridgeConfig, BridgeDeps } from "./bridge"
+export { createBridge, realScheduler } from "./bridge"
+export type { Bridge, BridgeConfig, BridgeDeps, Scheduler } from "./bridge"
+export { LANGUAGES, MESSAGES, messagesFor } from "./messages"
+export type { Language, Messages } from "./messages"
 export { ConfigError, parseConfig } from "./config"
 export type { Config, Env } from "./config"
 export { createKannaMcpApi } from "./kanna"
 export type {
+  ActivityEntry,
   AnswerToolRequestArgs,
   ChatStatus,
   KannaApi,

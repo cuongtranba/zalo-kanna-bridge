@@ -1,5 +1,6 @@
 import { arrayField, isJsonObject, stringField, type JsonObject, type JsonValue } from "./json"
 import type { KannaApi, KannaOutcome, PendingRequest } from "./kanna"
+import type { Messages } from "./messages"
 
 export type Decision = { type: "approve" } | { type: "deny"; reason?: string } | { type: "answer"; text: string }
 
@@ -15,44 +16,45 @@ function questionsOf(input: JsonValue): JsonObject[] {
   return (arrayField(input, "questions") ?? []).filter(isJsonObject)
 }
 
-function describeQuestion(question: JsonObject): string {
-  const text = clip(stringField(question, "question") ?? "(no question text)", SUMMARY_LIMIT)
+function describeQuestion(messages: Messages, question: JsonObject): string {
+  const text = clip(stringField(question, "question") ?? messages.noQuestionText, SUMMARY_LIMIT)
   const options = (arrayField(question, "options") ?? []).filter(isJsonObject).map((option) => {
     const label = stringField(option, "label") ?? "?"
     const description = stringField(option, "description")
     return clip(description === undefined ? `  - ${label}` : `  - ${label}: ${description}`, OPTION_LIMIT)
   })
-  return [`Question: ${text}`, ...options].join("\n")
+  return [messages.questionLabel(text), ...options].join("\n")
 }
 
-function describeOne(request: PendingRequest): string {
+function describeOne(messages: Messages, request: PendingRequest): string {
   if (request.tool === "AskUserQuestion") {
     const questions = questionsOf(request.input)
-    if (questions.length > 0) return questions.map(describeQuestion).join("\n")
+    if (questions.length > 0) return questions.map((question) => describeQuestion(messages, question)).join("\n")
   }
   if (request.tool === "ExitPlanMode" && isJsonObject(request.input)) {
-    return `Plan approval needed:\n${clip(stringField(request.input, "plan") ?? "(no plan text)", SUMMARY_LIMIT)}`
+    return messages.planApprovalNeeded(clip(stringField(request.input, "plan") ?? messages.noPlanText, SUMMARY_LIMIT))
   }
-  return `Permission needed for ${request.tool}: ${clip(JSON.stringify(request.input), SUMMARY_LIMIT)}`
+  return messages.permissionNeeded(request.tool, clip(JSON.stringify(request.input), SUMMARY_LIMIT))
 }
 
-export function describePending(requests: readonly PendingRequest[]): string {
-  return requests.map(describeOne).join("\n\n")
+export function describePending(messages: Messages, requests: readonly PendingRequest[]): string {
+  return requests.map((request) => describeOne(messages, request)).join("\n\n")
 }
 
-function wrongDecision(request: PendingRequest, decision: Decision): string {
-  if (request.tool === "AskUserQuestion") return "That is a question. Reply with /answer <text>."
-  if (request.tool === "ExitPlanMode") return `That is a plan. Reply with /approve or /deny <feedback> (not /${decision.type}).`
-  return "That is a tool permission. Reply with /approve or /deny <reason>."
+function wrongDecision(messages: Messages, request: PendingRequest, decision: Decision): string {
+  if (request.tool === "AskUserQuestion") return messages.wrongQuestion
+  if (request.tool === "ExitPlanMode") return messages.wrongPlan(decision.type)
+  return messages.wrongPermission
 }
 
 async function resolveToolRequest(
   kanna: KannaApi,
+  messages: Messages,
   chatId: string,
   request: PendingRequest,
   decision: Decision,
 ): Promise<KannaOutcome<string>> {
-  if (decision.type === "answer") return { ok: false, error: wrongDecision(request, decision) }
+  if (decision.type === "answer") return { ok: false, error: wrongDecision(messages, request, decision) }
   const sent = await kanna.answerToolRequest({
     chatId,
     toolRequestId: request.id,
@@ -62,39 +64,45 @@ async function resolveToolRequest(
         : { kind: "deny", ...(decision.reason === undefined ? {} : { reason: decision.reason }) },
   })
   if (!sent.ok) return sent
-  return { ok: true, value: `${decision.type === "approve" ? "Approved" : "Denied"} ${request.tool}.` }
+  return { ok: true, value: decision.type === "approve" ? messages.approvedTool(request.tool) : messages.deniedTool(request.tool) }
 }
 
 async function resolveInteractive(
   kanna: KannaApi,
+  messages: Messages,
   chatId: string,
   request: PendingRequest,
   decision: Decision,
 ): Promise<KannaOutcome<string>> {
   if (request.tool === "AskUserQuestion" && decision.type === "answer") {
     const question = stringField(questionsOf(request.input)[0] ?? {}, "question")
-    if (question === undefined) return { ok: false, error: "That question has no text to answer." }
+    if (question === undefined) return { ok: false, error: messages.questionHasNoText }
     const sent = await kanna.respondTool({ chatId, toolUseId: request.id, result: { answers: { [question]: decision.text } } })
-    return sent.ok ? { ok: true, value: "Answered the question." } : sent
+    return sent.ok ? { ok: true, value: messages.answeredQuestion } : sent
   }
   if (request.tool === "ExitPlanMode" && decision.type !== "answer") {
     const result: JsonObject =
       decision.type === "approve" ? { confirmed: true } : { confirmed: false, message: decision.reason ?? "Rejected" }
     const sent = await kanna.respondTool({ chatId, toolUseId: request.id, result })
-    return sent.ok ? { ok: true, value: decision.type === "approve" ? "Approved the plan." : "Rejected the plan." } : sent
+    return sent.ok ? { ok: true, value: decision.type === "approve" ? messages.approvedPlan : messages.rejectedPlan } : sent
   }
   if (request.tool === "AskUserQuestion" || request.tool === "ExitPlanMode") {
-    return { ok: false, error: wrongDecision(request, decision) }
+    return { ok: false, error: wrongDecision(messages, request, decision) }
   }
-  return { ok: false, error: `Cannot answer ${request.tool} from Zalo; answer it in Kanna.` }
+  return { ok: false, error: messages.cannotAnswerHere(request.tool) }
 }
 
-export async function resolvePending(kanna: KannaApi, chatId: string, decision: Decision): Promise<KannaOutcome<string>> {
+export async function resolvePending(
+  kanna: KannaApi,
+  messages: Messages,
+  chatId: string,
+  decision: Decision,
+): Promise<KannaOutcome<string>> {
   const listed = await kanna.listPendingToolRequests(chatId)
   if (!listed.ok) return listed
   const request = listed.value[0]
-  if (request === undefined) return { ok: false, error: "Nothing is waiting for approval." }
+  if (request === undefined) return { ok: false, error: messages.nothingWaiting }
   return request.kind === "tool_request"
-    ? resolveToolRequest(kanna, chatId, request, decision)
-    : resolveInteractive(kanna, chatId, request, decision)
+    ? resolveToolRequest(kanna, messages, chatId, request, decision)
+    : resolveInteractive(kanna, messages, chatId, request, decision)
 }

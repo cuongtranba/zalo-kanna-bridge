@@ -2,10 +2,11 @@ import { createAdminOps } from "./admin"
 import { resolvePending, describePending, type Decision } from "./approvals"
 import { ADMIN_COMMANDS, helpText, parseCommand, stripBotMention, type ParsedCommand } from "./commands"
 import type { Config } from "./config"
-import { extractDirectives, runDirective } from "./directives"
+import { extractDirectives, runDirective, type ParsedDirective } from "./directives"
 import { errorMessage, isJsonObject, parseJson } from "./json"
 import type { KannaApi, KannaResult } from "./kanna"
 import { consoleLogger, type Logger } from "./log"
+import { MESSAGES, type Messages } from "./messages"
 import { adminPreamble, userPreamble } from "./preamble"
 import { resolveSender } from "./roles"
 import type { BridgeStore } from "./state"
@@ -15,16 +16,38 @@ export type { Logger } from "./log"
 
 export type BridgeConfig = Pick<
   Config,
-  "webhookSecret" | "webhookPath" | "superadminIds" | "kannaDefaultDir" | "userDirRoot" | "turnDeadlineSeconds"
+  | "webhookSecret"
+  | "webhookPath"
+  | "superadminIds"
+  | "kannaDefaultDir"
+  | "userDirRoot"
+  | "turnDeadlineSeconds"
+  | "progressPollSeconds"
+  | "progressUpdateSeconds"
+  | "progressTypingSeconds"
+  | "progressAck"
 > & { botDisplayName?: string | undefined }
+
+export interface Scheduler {
+  every(intervalMs: number, task: () => void): () => void
+}
+
+export const realScheduler: Scheduler = {
+  every(intervalMs, task) {
+    const handle = setInterval(task, intervalMs)
+    return () => clearInterval(handle)
+  },
+}
 
 export interface BridgeDeps {
   config: BridgeConfig
   kanna: KannaApi
   zalo: ZaloApi
   store: BridgeStore
+  messages?: Messages
   log?: Logger
   now?: () => number
+  scheduler?: Scheduler
 }
 
 export interface Bridge {
@@ -32,25 +55,8 @@ export interface Bridge {
   idle(): Promise<void>
 }
 
-export const MESSAGES = {
-  newConversation: "Started a new Kanna conversation.",
-  emptyReply: "(Kanna finished without a text reply.)",
-  waitingForAdmin: "Waiting for an admin to approve a step.",
-  waitingForYou: "Kanna is waiting for you. Reply /approve, /deny <reason> or /answer <text>.",
-  waitingGeneric: "Kanna is waiting for a permission approval.",
-  nothingWaiting: "Nothing is waiting for approval.",
-  turnFailed: "The Kanna turn failed. Check the chat in Kanna.",
-  stillWorking: "Kanna is still working on this. Check the chat in Kanna.",
-  unreachable: "Could not reach Kanna right now.",
-  kannaError: "Kanna returned an error. Check the chat in Kanna.",
-  textOnly: "Only text messages are supported for now.",
-  adminOnly: "That command is for admins only.",
-  noAccess: (zaloId: string) =>
-    `You don't have access to this bot yet. Your Zalo id is ${zaloId}. Ask an admin to give you access.`,
-} as const
-
 const SEEN_MESSAGE_LIMIT = 1000
-const POLL_TIMEOUT_SECONDS = 90
+const STATUS_TOOL_LIMIT = 5
 const NO_ACCESS_REPLY_INTERVAL_MS = 24 * 60 * 60 * 1000
 const KNOWN_USERS_IN_PREAMBLE = 20
 const MCP_REPLY_LIMIT = 6000
@@ -77,11 +83,34 @@ interface WaitingConversation extends Participant {
   cursor: number | undefined
 }
 
-type FollowStart = Pick<KannaResult, "chatId" | "status" | "done" | "assistantText"> & { cursor?: number }
+type FollowStart = Pick<KannaResult, "chatId" | "status" | "done" | "assistantText" | "activity"> & { cursor?: number }
 
 type Turn =
-  | { kind: "reply"; text: string; waiting?: { kannaChatId: string; cursor: number | undefined } }
+  | {
+      kind: "reply"
+      text: string
+      directives: ParsedDirective[]
+      waiting?: { kannaChatId: string; cursor: number | undefined }
+    }
   | { kind: "kanna_error"; error: string }
+
+interface TurnProgress {
+  lastSentAt: number
+  answeredInPieces: boolean
+  tools: string[]
+}
+
+function isSettled(call: Pick<KannaResult, "done" | "status">): boolean {
+  return call.done || call.status === "waiting_for_user"
+}
+
+function toolLabel(toolName: string): string {
+  if (!toolName.startsWith("mcp__")) return toolName
+  const rest = toolName.slice("mcp__".length)
+  const separator = rest.indexOf("__")
+  const tool = separator === -1 ? "" : rest.slice(separator + 2)
+  return tool === "" ? toolName : tool
+}
 
 function joinParagraphs(parts: readonly string[]): string {
   return parts
@@ -98,7 +127,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const { config, kanna, zalo, store } = deps
   const log = deps.log ?? consoleLogger
   const now = deps.now ?? Date.now
-  const admin = createAdminOps({ config, kanna, store, now })
+  const messages = deps.messages ?? MESSAGES
+  const scheduler = deps.scheduler ?? realScheduler
+  const admin = createAdminOps({ config, kanna, messages, store, now })
 
   const pending = new Set<Promise<void>>()
   const tails = new Map<string, Promise<void>>()
@@ -144,37 +175,82 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
   }
 
-  async function followTurn(first: FollowStart): Promise<Turn> {
-    const pieces: string[] = [first.assistantText]
+  async function typing(zaloChatId: string): Promise<void> {
+    try {
+      await zalo.sendTyping(zaloChatId)
+    } catch (error) {
+      log.error(`failed to send the Zalo typing indicator: ${errorMessage(error)}`)
+    }
+  }
+
+  async function sayDuringTurn(who: Participant, progress: TurnProgress, text: string): Promise<void> {
+    await say(who.chatId, text)
+    progress.lastSentAt = now()
+  }
+
+  function collectTools(progress: TurnProgress, activity: KannaResult["activity"]): void {
+    for (const entry of activity) {
+      if (entry.toolName === undefined || entry.toolName === "") continue
+      const label = toolLabel(entry.toolName)
+      if (progress.tools.length < STATUS_TOOL_LIMIT && !progress.tools.includes(label)) progress.tools.push(label)
+    }
+  }
+
+  async function followTurn(who: Participant, first: FollowStart, progress: TurnProgress): Promise<Turn> {
+    const held: string[] = []
+    const directives: ParsedDirective[] = []
+    const updateAfterMs = config.progressUpdateSeconds * 1000
+
+    async function absorb(call: FollowStart): Promise<void> {
+      const extracted = extractDirectives(call.assistantText)
+      directives.push(...extracted.directives)
+      if (isSettled(call)) {
+        held.push(extracted.text)
+        return
+      }
+      if (extracted.text !== "") {
+        progress.answeredInPieces = true
+        await sayDuringTurn(who, progress, extracted.text)
+        return
+      }
+      collectTools(progress, call.activity)
+      if (now() - progress.lastSentAt >= updateAfterMs) {
+        await sayDuringTurn(who, progress, messages.stillWorking(progress.tools))
+        progress.tools = []
+      }
+    }
+
     let latest = first
+    await absorb(first)
     const deadline = now() + config.turnDeadlineSeconds * 1000
-    while (!latest.done && latest.status !== "waiting_for_user") {
+    while (!isSettled(latest)) {
       if (now() >= deadline) {
-        return { kind: "reply", text: joinParagraphs([...pieces, MESSAGES.stillWorking]) }
+        return { kind: "reply", text: joinParagraphs([...held, messages.deadlineReached]), directives }
       }
       const waited = await kanna.waitForChat({
         chatId: first.chatId,
         ...(latest.cursor === undefined ? {} : { cursor: latest.cursor }),
-        timeoutSeconds: POLL_TIMEOUT_SECONDS,
+        timeoutSeconds: config.progressPollSeconds,
       })
       if (!waited.ok) return { kind: "kanna_error", error: waited.error }
       latest = waited.value
-      pieces.push(latest.assistantText)
+      await absorb(latest)
     }
     if (latest.status === "waiting_for_user") {
       return {
         kind: "reply",
-        text: joinParagraphs(pieces),
+        text: joinParagraphs(held),
+        directives,
         waiting: { kannaChatId: first.chatId, cursor: latest.cursor },
       }
     }
     if (latest.status === "failed") {
-      return { kind: "reply", text: joinParagraphs([...pieces, MESSAGES.turnFailed]) }
+      return { kind: "reply", text: joinParagraphs([...held, messages.turnFailed]), directives }
     }
-    return { kind: "reply", text: joinParagraphs(pieces) || MESSAGES.emptyReply }
+    return { kind: "reply", text: joinParagraphs(held), directives }
   }
 
-  async function runTurn(who: Participant, messageId: string, text: string): Promise<Turn> {
+  async function runTurn(who: Participant, messageId: string, text: string, progress: TurnProgress): Promise<Turn> {
     const workspace = await admin.workspaceFor(who.role, who.fromId)
     if (!workspace.ok) return { kind: "kanna_error", error: workspace.error }
     const { dir, projectId } = workspace.value
@@ -182,7 +258,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       who.role === "user"
         ? userPreamble(who.name, dir, text)
         : adminPreamble(who.name, admin.knownUsers(KNOWN_USERS_IN_PREAMBLE), text)
-    const base = { content, idempotencyKey: `zalo:${messageId}`, timeoutSeconds: POLL_TIMEOUT_SECONDS }
+    const base = { content, idempotencyKey: `zalo:${messageId}`, timeoutSeconds: config.progressPollSeconds }
     const openInProject = () => kanna.sendMessage({ ...base, projectId })
 
     const stored = store.getConversation(who.convKey)
@@ -196,14 +272,14 @@ export function createBridge(deps: BridgeDeps): Bridge {
     if (sent.value.chatId !== mapped) {
       await remember("conversation mapping", store.setConversation(who.convKey, { kannaChatId: sent.value.chatId, projectId }))
     }
-    return followTurn(sent.value)
+    return followTurn(who, sent.value, progress)
   }
 
   async function notifyAdmins(who: Participant, details: string): Promise<void> {
     const text = joinParagraphs([
-      `${who.name} (${who.fromId}) is waiting for approval.`,
+      messages.waitingUserNotice(who.name, who.fromId),
       details,
-      `Reply /approve ${who.fromId}, /deny ${who.fromId} <reason> or /answer ${who.fromId} <text>.`,
+      messages.adminReplyHint(who.fromId),
     ])
     let notified = 0
     for (const adminId of config.superadminIds) {
@@ -219,74 +295,100 @@ export function createBridge(deps: BridgeDeps): Bridge {
     let details = ""
     try {
       const listed = await kanna.listPendingToolRequests(wait.kannaChatId)
-      if (listed.ok) details = describePending(listed.value)
+      if (listed.ok) details = describePending(messages, listed.value)
       else log.error(`could not list pending Kanna requests: ${listed.error}`)
     } catch (error) {
       log.error(`could not list pending Kanna requests: ${errorMessage(error)}`)
     }
     waiting.set(who.convKey, { ...who, kannaChatId: wait.kannaChatId, cursor: wait.cursor })
-    if (who.role === "superadmin") return joinParagraphs([details || MESSAGES.waitingGeneric, MESSAGES.waitingForYou])
+    if (who.role === "superadmin") return joinParagraphs([details || messages.waitingGeneric, messages.waitingForYou])
     await notifyAdmins(who, details)
-    return MESSAGES.waitingForAdmin
+    return messages.waitingForAdmin
   }
 
-  async function applyDirectives(who: Participant, text: string): Promise<string> {
-    const extracted = extractDirectives(text)
-    if (extracted.directives.length === 0) return text
+  async function applyDirectives(who: Participant, text: string, directives: readonly ParsedDirective[]): Promise<string> {
+    if (directives.length === 0) return text
     if (who.role !== "superadmin") {
-      log.info(`ignored ${extracted.directives.length} bridge action line(s) in a turn for user ${who.fromId}`)
-      return extracted.text
+      log.info(`ignored ${directives.length} bridge action line(s) in a turn for user ${who.fromId}`)
+      return text
     }
     const results: string[] = []
-    for (const directive of extracted.directives) {
+    for (const directive of directives) {
       try {
-        results.push((await runDirective(admin, who.fromId, directive)).text)
+        results.push((await runDirective(admin, messages, who.fromId, directive)).text)
       } catch (error) {
         log.error(`bridge action failed: ${errorMessage(error)}`)
-        results.push(MESSAGES.unreachable)
+        results.push(messages.unreachable)
       }
     }
-    return joinParagraphs([extracted.text, results.join("\n")])
+    return joinParagraphs([text, results.join("\n")])
   }
 
-  async function deliver(who: Participant, turn: Turn): Promise<void> {
+  async function deliver(who: Participant, turn: Turn, progress: TurnProgress): Promise<void> {
     if (turn.kind === "kanna_error") {
       log.error(`Kanna returned an error: ${turn.error}`)
-      await say(who.chatId, MESSAGES.kannaError)
+      await say(who.chatId, messages.kannaError)
       return
     }
-    let text = await applyDirectives(who, turn.text)
+    let text = await applyDirectives(who, turn.text, turn.directives)
     if (turn.waiting === undefined) {
       waiting.delete(who.convKey)
     } else {
       text = joinParagraphs([text, await waitingNotice(who, turn.waiting)])
     }
-    await say(who.chatId, text || MESSAGES.emptyReply)
+    if (text === "" && progress.answeredInPieces) return
+    await say(who.chatId, text || messages.emptyReply)
   }
 
-  async function followAndDeliver(who: Participant, start: () => Promise<Turn>): Promise<void> {
+  async function followWithTyping(
+    who: Participant,
+    options: { ack: boolean },
+    progress: TurnProgress,
+    start: () => Promise<Turn>,
+  ): Promise<Turn> {
+    await typing(who.chatId)
+    if (options.ack && config.progressAck) await sayDuringTurn(who, progress, messages.received)
+    const stopTyping = scheduler.every(config.progressTypingSeconds * 1000, () => void typing(who.chatId))
+    try {
+      return await start()
+    } finally {
+      stopTyping()
+    }
+  }
+
+  async function followAndDeliver(
+    who: Participant,
+    options: { ack: boolean },
+    start: (progress: TurnProgress) => Promise<Turn>,
+  ): Promise<void> {
+    const progress: TurnProgress = { lastSentAt: now(), answeredInPieces: false, tools: [] }
     let turn: Turn
     try {
-      turn = await start()
+      turn = await followWithTyping(who, options, progress, () => start(progress))
     } catch (error) {
       log.error(`Kanna call failed: ${errorMessage(error)}`)
-      await say(who.chatId, MESSAGES.unreachable)
+      await say(who.chatId, messages.unreachable)
       return
     }
-    await deliver(who, turn)
+    await deliver(who, turn, progress)
   }
 
   function resumeAfterDecision(target: WaitingConversation): void {
     waiting.delete(target.convKey)
     enqueue(target.convKey, () =>
-      followAndDeliver(target, () =>
-        followTurn({
-          chatId: target.kannaChatId,
-          status: "running",
-          done: false,
-          assistantText: "",
-          ...(target.cursor === undefined ? {} : { cursor: target.cursor }),
-        }),
+      followAndDeliver(target, { ack: false }, (progress) =>
+        followTurn(
+          target,
+          {
+            chatId: target.kannaChatId,
+            status: "running",
+            done: false,
+            assistantText: "",
+            activity: [],
+            ...(target.cursor === undefined ? {} : { cursor: target.cursor }),
+          },
+          progress,
+        ),
       ),
     )
   }
@@ -298,65 +400,68 @@ export function createBridge(deps: BridgeDeps): Bridge {
     let target = named ?? waiting.get(who.convKey)
     if (target === undefined) {
       const stored = store.getConversation(who.convKey)
-      if (stored === undefined) return MESSAGES.nothingWaiting
+      if (stored === undefined) return messages.nothingWaiting
       target = { ...who, kannaChatId: stored.kannaChatId, cursor: undefined }
     }
     let decision: Decision
     if (name === "approve") {
-      if (remaining !== "") return `No request from ${first} is waiting. Usage: /approve [zaloId]`
+      if (remaining !== "") return messages.usageApprove(first)
       decision = { type: "approve" }
     } else if (name === "deny") {
       decision = remaining === "" ? { type: "deny" } : { type: "deny", reason: remaining }
     } else {
-      if (remaining === "") return "Usage: /answer [zaloId] <text>"
+      if (remaining === "") return messages.usageAnswer
       decision = { type: "answer", text: remaining }
     }
-    const resolved = await resolvePending(kanna, target.kannaChatId, decision)
+    const resolved = await resolvePending(kanna, messages, target.kannaChatId, decision)
     if (!resolved.ok) return resolved.error
     resumeAfterDecision(target)
-    return `${resolved.value} Waiting for Kanna's reply.`
+    return messages.waitingForReply(resolved.value)
   }
 
   async function runMcp(rest: string): Promise<string> {
     const [tool = ""] = rest.split(/\s+/)
     const rawArgs = rest.slice(tool.length).trim()
-    const usage = "Usage: /mcp <tool> [json object]"
+    const usage = messages.usageMcp
     if (tool === "") return usage
     let args = {}
     if (rawArgs !== "") {
       const parsed = parseJson(rawArgs)
-      if (parsed === undefined || !isJsonObject(parsed)) return `The arguments must be a JSON object. ${usage}`
+      if (parsed === undefined || !isJsonObject(parsed)) return messages.mcpArgumentsNotObject(usage)
       args = parsed
     }
     const called = await kanna.callTool(tool, args)
-    const text = called.ok ? called.value : `Error: ${called.error}`
-    return text.length > MCP_REPLY_LIMIT ? `${text.slice(0, MCP_REPLY_LIMIT)}\n...(truncated)` : text
+    const text = called.ok ? called.value : messages.mcpError(called.error)
+    return text.length > MCP_REPLY_LIMIT ? `${text.slice(0, MCP_REPLY_LIMIT)}\n${messages.mcpTruncated}` : text
   }
 
   async function runCommand(who: Participant, command: ParsedCommand): Promise<string> {
-    if (ADMIN_COMMANDS.has(command.name) && who.role !== "superadmin") return MESSAGES.adminOnly
+    if (ADMIN_COMMANDS.has(command.name) && who.role !== "superadmin") return messages.adminOnly
     switch (command.name) {
       case "help":
-        return helpText(who.role)
+        return helpText(messages, who.role)
       case "whoami": {
-        const dir = who.role === "superadmin" ? admin.currentDir(who.fromId) : (store.getUser(who.fromId)?.dir ?? "none")
-        return `Role: ${who.role}\nZalo id: ${who.fromId}\nDirectory: ${dir}`
+        const dir =
+          who.role === "superadmin"
+            ? admin.currentDir(who.fromId)
+            : (store.getUser(who.fromId)?.dir ?? messages.noDirectory)
+        return messages.whoami(who.role, who.fromId, dir)
       }
       case "new":
         await store.deleteConversation(who.convKey)
         waiting.delete(who.convKey)
-        return MESSAGES.newConversation
+        return messages.newConversation
       case "dir":
-        if (command.rest === "") return `Current directory: ${admin.currentDir(who.fromId)}`
+        if (command.rest === "") return messages.currentDir(admin.currentDir(who.fromId))
         return (await admin.setDir(who.fromId, command.rest)).text
       case "assign": {
         const [userId = ""] = command.rest.split(/\s+/)
         const dir = command.rest.slice(userId.length).trim()
-        if (userId === "" || dir === "") return "Usage: /assign <zaloId> <path>"
+        if (userId === "" || dir === "") return messages.usageAssign
         return (await admin.assign(who.fromId, userId, dir)).text
       }
       case "unassign":
-        return command.rest === "" ? "Usage: /unassign <zaloId>" : (await admin.unassign(command.rest)).text
+        return command.rest === "" ? messages.usageUnassign : (await admin.unassign(command.rest)).text
       case "users":
         return admin.describeUsers()
       case "approve":
@@ -366,7 +471,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       case "mcp":
         return runMcp(command.rest)
       default:
-        return helpText(who.role)
+        return helpText(messages, who.role)
     }
   }
 
@@ -384,12 +489,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
         reply = await runCommand(who, command)
       } catch (error) {
         log.error(`command /${command.name} failed: ${errorMessage(error)}`)
-        reply = MESSAGES.unreachable
+        reply = messages.unreachable
       }
       await say(who.chatId, reply)
       return
     }
-    await followAndDeliver(who, () => runTurn(who, messageId, text))
+    await followAndDeliver(who, { ack: true }, (progress) => runTurn(who, messageId, text, progress))
   }
 
   async function handleUnknown(message: ZaloMessage): Promise<void> {
@@ -410,7 +515,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       log.info(
         `message from ${message.fromId} (${message.displayName}) role=unknown chat=${chatKind(message.chatType)} kind=text`,
       )
-      await say(message.chatId, MESSAGES.noAccess(message.fromId))
+      await say(message.chatId, messages.noAccess(message.fromId))
     }
   }
 
@@ -433,7 +538,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await remember("admin chat", store.updateAdmin(message.fromId, { chatId: message.chatId }))
     }
     if (eventName !== TEXT_EVENT) {
-      await say(message.chatId, MESSAGES.textOnly)
+      await say(message.chatId, messages.textOnly)
       return
     }
     if (message.text === undefined) return

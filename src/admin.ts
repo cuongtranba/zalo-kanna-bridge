@@ -1,5 +1,6 @@
 import type { BridgeConfig } from "./bridge"
 import type { KannaApi, KannaOutcome } from "./kanna"
+import type { Messages } from "./messages"
 import { isInsideRoot, normalizeDir } from "./roles"
 import type { BridgeStore } from "./state"
 
@@ -26,11 +27,11 @@ export interface AdminOps {
 export interface AdminOpsDeps {
   config: Pick<BridgeConfig, "superadminIds" | "kannaDefaultDir" | "userDirRoot">
   kanna: KannaApi
+  messages: Messages
   store: BridgeStore
   now: () => number
 }
 
-const DIR_HELP = "A path must be absolute (/...) or start with ~/."
 const SEEN_LISTED = 20
 
 function fail(text: string): OpResult {
@@ -42,7 +43,7 @@ function when(timestamp: number): string {
 }
 
 export function createAdminOps(deps: AdminOpsDeps): AdminOps {
-  const { config, kanna, store, now } = deps
+  const { config, kanna, messages, store, now } = deps
 
   function unassignedSeen(): [string, { name: string; lastSeen: number }][] {
     return store
@@ -76,41 +77,41 @@ export function createAdminOps(deps: AdminOpsDeps): AdminOps {
       return { ok: true, value: { dir: user.dir, projectId: user.projectId } }
     },
     async assign(adminId, userId, dirInput) {
-      if (!/^\S+$/.test(userId)) return fail("A Zalo user id cannot be empty or contain spaces.")
-      if (config.superadminIds.has(userId)) return fail(`${userId} is a superadmin and needs no assignment.`)
+      if (!/^\S+$/.test(userId)) return fail(messages.userIdInvalid)
+      if (config.superadminIds.has(userId)) return fail(messages.isSuperadmin(userId))
       const dir = normalizeDir(dirInput)
-      if (dir === undefined) return fail(DIR_HELP)
+      if (dir === undefined) return fail(messages.dirHelp)
       if (config.userDirRoot !== undefined && !isInsideRoot(dir, config.userDirRoot)) {
-        return fail(`Users can only be assigned a directory inside ${config.userDirRoot}.`)
+        return fail(messages.dirOutsideRoot(config.userDirRoot))
       }
       const opened = await kanna.openProject(dir)
-      if (!opened.ok) return fail(`Kanna could not open ${dir}: ${opened.error}`)
+      if (!opened.ok) return fail(messages.couldNotOpen(dir, opened.error))
       const name = store.getUser(userId)?.name ?? store.getSeen(userId)?.name ?? userId
       await store.setUser(userId, { dir, projectId: opened.value, name, assignedBy: adminId, assignedAt: now() })
-      return { ok: true, text: `Assigned ${name} (${userId}) to ${dir}.` }
+      return { ok: true, text: messages.assigned(name, userId, dir) }
     },
     async unassign(userId) {
       const user = store.getUser(userId)
-      if (user === undefined) return fail(`${userId} is not an assigned user.`)
+      if (user === undefined) return fail(messages.notAssigned(userId))
       await store.deleteUser(userId)
-      return { ok: true, text: `Removed ${user.name} (${userId}); they no longer have access.` }
+      return { ok: true, text: messages.removed(user.name, userId) }
     },
     async setDir(adminId, dirInput) {
       const dir = normalizeDir(dirInput)
-      if (dir === undefined) return fail(DIR_HELP)
+      if (dir === undefined) return fail(messages.dirHelp)
       const opened = await kanna.openProject(dir)
-      if (!opened.ok) return fail(`Kanna could not open ${dir}: ${opened.error}`)
+      if (!opened.ok) return fail(messages.couldNotOpen(dir, opened.error))
       await store.updateAdmin(adminId, { dir, projectDir: dir, projectId: opened.value })
-      return { ok: true, text: `Your directory is now ${dir}. Your next message starts a new Kanna conversation there.` }
+      return { ok: true, text: messages.dirChanged(dir) }
     },
     describeUsers() {
       const assigned = store.listUsers().map(([id, user]) => `- ${user.name} (${id}) -> ${user.dir}`)
       const seen = unassignedSeen()
         .slice(0, SEEN_LISTED)
-        .map(([id, entry]) => `- ${entry.name} (${id}), last seen ${when(entry.lastSeen)}`)
+        .map(([id, entry]) => `- ${entry.name} (${id}), ${messages.lastSeen(when(entry.lastSeen))}`)
       return [
-        assigned.length > 0 ? `Assigned users:\n${assigned.join("\n")}` : "No users are assigned yet.",
-        seen.length > 0 ? `Seen but not assigned (use /assign <id> <path>):\n${seen.join("\n")}` : "",
+        assigned.length > 0 ? `${messages.assignedUsersHeading}\n${assigned.join("\n")}` : messages.noUsersAssigned,
+        seen.length > 0 ? `${messages.seenUsersHeading}\n${seen.join("\n")}` : "",
       ]
         .filter((part) => part.length > 0)
         .join("\n\n")

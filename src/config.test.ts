@@ -34,3 +34,9 @@ test("config reads superadmin ids and a normalised optional user directory root"
   expect(config.userDirRoot).toBe("~/Kanna/users")
   expect(() => parseConfig({ ...validEnv, ZALO_USER_DIR_ROOT: "relative/path" })).toThrow(/ZALO_USER_DIR_ROOT/)
 })
+
+test("BRIDGE_LANGUAGE accepts vi and refuses an unknown language", () => {
+  expect(parseConfig({ ...validEnv, BRIDGE_LANGUAGE: "vi" }).language).toBe("vi")
+  expect(parseConfig(validEnv).language).toBe("en")
+  expect(() => parseConfig({ ...validEnv, BRIDGE_LANGUAGE: "fr" })).toThrow(/BRIDGE_LANGUAGE/)
+})
