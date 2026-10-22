@@ -20,5 +20,5 @@ export type {
 export type { Logger } from "./log"
 export { createFileStore } from "./state"
 export type { AdminRecord, BridgeStore, Conversation, SeenRecord, UserRecord } from "./state"
-export { ZALO_API_BASE_URL, ZALO_MESSAGE_LIMIT, chunkText, createZaloApi, verifySecret } from "./zalo"
+export { ZALO_API_BASE_URL, ZALO_MESSAGE_LIMIT, chunkText, createZaloApi, fetchBotDisplayName, verifySecret } from "./zalo"
 export type { ZaloApi, ZaloClientOptions } from "./zalo"

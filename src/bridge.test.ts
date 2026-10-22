@@ -26,6 +26,7 @@ const USER_A = "user-a"
 const USER_B = "user-b"
 const ADMIN_CHAT = "admin-chat"
 const DAY_MS = 24 * 60 * 60 * 1000
+const BOT_NAME = "Bot kanna (Test)"
 
 const tempDirs: string[] = []
 
@@ -161,6 +162,7 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: B
       kannaDefaultDir: DEFAULT_DIR,
       userDirRoot: options.userDirRoot,
       turnDeadlineSeconds: 1800,
+      botDisplayName: BOT_NAME,
     },
     kanna,
     zalo,
@@ -615,4 +617,30 @@ test("a version 1 state file is migrated without crashing and conversations star
   expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([[`project:${DEFAULT_DIR}`, undefined]])
   expect(saved.version).toBe(2)
   expect(log.lines.some((line) => line.includes("version 1"))).toBe(true)
+})
+
+test("in a group, a mentioned command from the superadmin runs as a command and never reaches Kanna", async () => {
+  const kanna = createFakeKanna()
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile())
+
+  await say(bridge, { text: `@${BOT_NAME} /whoami`, chatId: "group-1", chatType: "GROUP" })
+
+  expect(textsTo(zalo, "group-1")).toHaveLength(1)
+  expect(textsTo(zalo, "group-1")[0]).toContain(`Role: superadmin`)
+  expect(kanna.sends).toHaveLength(0)
+})
+
+test("a mention is removed from text forwarded to Kanna", async () => {
+  const kanna = createFakeKanna()
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile())
+
+  await say(bridge, { text: `@${BOT_NAME.toUpperCase()} hello there`, chatId: "group-1", chatType: "GROUP" })
+
+  expect(kanna.sends).toHaveLength(1)
+  const content = userPart(kanna.sends[0]?.content ?? "")
+  expect(content).toContain("hello there")
+  expect(content).not.toContain(`@${BOT_NAME.slice(0, 3)}`)
+  expect(content).not.toContain("@")
 })

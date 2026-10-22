@@ -3,7 +3,7 @@ import { ConfigError, parseConfig } from "./config"
 import { errorMessage } from "./json"
 import { createKannaMcpApi } from "./kanna"
 import { createFileStore } from "./state"
-import { createZaloApi } from "./zalo"
+import { createZaloApi, fetchBotDisplayName } from "./zalo"
 
 function loadConfig() {
   try {
@@ -17,8 +17,19 @@ function loadConfig() {
 
 const config = loadConfig()
 
+async function loadBotDisplayName(): Promise<string | undefined> {
+  try {
+    return await fetchBotDisplayName({ token: config.zaloBotToken })
+  } catch (error) {
+    console.warn(`zalo-kanna-bridge: could not read the bot name via getMe; @mentions will not be stripped: ${errorMessage(error)}`)
+    return undefined
+  }
+}
+
+const botDisplayName = await loadBotDisplayName()
+
 const bridge = createBridge({
-  config,
+  config: { ...config, botDisplayName },
   kanna: createKannaMcpApi({ url: config.kannaMcpUrl, password: config.kannaPassword }),
   zalo: createZaloApi({ token: config.zaloBotToken }),
   store: createFileStore(config.stateFile),
@@ -28,6 +39,7 @@ const server = Bun.serve({ port: config.port, fetch: (request) => bridge.fetch(r
 
 console.log(
   `zalo-kanna-bridge listening on port ${server.port}; webhook ${config.webhookPath}; ` +
+    `bot name ${botDisplayName ?? "unknown"}; ` +
     `${config.superadminIds.size} superadmin(s); Kanna at ${new URL(config.kannaMcpUrl).origin}`,
 )
 

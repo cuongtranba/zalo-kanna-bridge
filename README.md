@@ -106,6 +106,8 @@ The bot decides who is talking from the sender's Zalo id.
 
 Every Zalo sender has their own Kanna conversation, even inside a group chat. Replies go back to the chat the message came from.
 
+In groups the bot only receives messages that mention it, so mention the bot first: commands work as `@<bot> /whoami`. At startup the bridge reads the bot's own name with Zalo's `getMe` and removes `@<bot name>` from every message before handling it, so neither commands nor Kanna see the mention. If `getMe` fails, the bridge logs a warning and carries on without stripping. A message that is only the mention is treated as `/help`.
+
 ## Find your Zalo user id
 
 1. Start the bridge with any placeholder in `ZALO_SUPERADMIN_IDS` (for example `0`).
