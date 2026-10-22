@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { createBridge, createFileChatMap, createZaloApi, type KannaApi } from "./index"
+import { createBridge, createFileStore, createZaloApi, type KannaApi } from "./index"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -82,6 +82,21 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
     async waitForChat() {
       return { ok: false, error: "unexpected wait" }
     },
+    async openProject() {
+      return { ok: true, value: "project-1" }
+    },
+    async callTool() {
+      return { ok: false, error: "unexpected tool call" }
+    },
+    async listPendingToolRequests() {
+      return { ok: true, value: [] }
+    },
+    async answerToolRequest() {
+      return { ok: false, error: "unexpected answer" }
+    },
+    async respondTool() {
+      return { ok: false, error: "unexpected response" }
+    },
   }
   const dir = await mkdtemp(join(tmpdir(), "zalo-kanna-bridge-"))
   const server = startFakeZaloServer()
@@ -90,13 +105,13 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
       config: {
         webhookSecret: SECRET,
         webhookPath: "/zalo/webhook",
-        allowedUserIds: new Set(["user-1"]),
-        kannaProjectId: "project-1",
+        superadminIds: new Set(["user-1"]),
+        kannaDefaultDir: "/tmp/project-1",
         turnDeadlineSeconds: 1800,
       },
       kanna,
       zalo: createZaloApi({ token: TOKEN, baseUrl: server.baseUrl }),
-      chats: createFileChatMap(join(dir, "state.json")),
+      store: createFileStore(join(dir, "state.json")),
     })
     await bridge.fetch(
       new Request("http://bridge.test/zalo/webhook", {

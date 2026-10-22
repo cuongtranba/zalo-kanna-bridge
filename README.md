@@ -12,9 +12,9 @@ sequenceDiagram
 
     U->>Z: Send text message
     Z->>B: POST webhook (X-Bot-Api-Secret-Token)
-    B->>B: Verify secret, allowlist, dedupe
+    B->>B: Verify secret, resolve role, dedupe
     B-->>Z: 200 {"ok":true} immediately
-    B->>M: send_message (chatId or projectId)
+    B->>M: send_message (chatId or projectId of the sender's directory)
     M->>A: Run turn
     loop until done
         B->>M: wait_for_chat (cursor)
@@ -34,7 +34,7 @@ sequenceDiagram
 
 ## Configuration
 
-All configuration is through environment variables, validated at startup. The bridge refuses to start and lists what is missing or invalid.
+All configuration is through environment variables, validated at startup. The bridge refuses to start and lists what is missing or invalid. If only `ZALO_ALLOWED_USER_IDS` or `KANNA_PROJECT_ID` is still set, the error names the variable that replaces it.
 
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
@@ -42,11 +42,12 @@ All configuration is through environment variables, validated at startup. The br
 | `ZALO_WEBHOOK_SECRET` | yes | | Secret (8–256 chars) Zalo sends in `X-Bot-Api-Secret-Token`. |
 | `KANNA_MCP_URL` | yes | | Kanna remote MCP endpoint, e.g. `https://kanna.example.com/mcp`. |
 | `KANNA_PASSWORD` | yes | | Kanna password, sent as `Authorization: Bearer`. |
-| `KANNA_PROJECT_ID` | yes | | Kanna project that new chats open in. |
-| `ZALO_ALLOWED_USER_IDS` | yes | | Comma-separated Zalo user ids allowed to use the bot. Must not be empty. |
+| `ZALO_SUPERADMIN_IDS` | yes | | Comma-separated Zalo user ids with full control. Must not be empty. Replaces `ZALO_ALLOWED_USER_IDS`. |
+| `KANNA_DEFAULT_DIR` | yes | | Directory superadmins start in, absolute (`/...`) or `~/...`. Kanna opens it as a project (and creates it if missing). Replaces `KANNA_PROJECT_ID`. |
+| `ZALO_USER_DIR_ROOT` | no | | When set, `/assign` and the admin `assign` action only accept directories at or below this path. Superadmins' own `/dir` is not restricted. |
 | `PORT` | no | `3000` | HTTP port. |
 | `WEBHOOK_PATH` | no | `/zalo/webhook` | Path Zalo posts to. |
-| `STATE_FILE` | no | `./data/state.json` | Where the Zalo chat to Kanna chat mapping is stored. |
+| `STATE_FILE` | no | `./data/state.json` | Where conversations, users and assignments are stored. |
 | `KANNA_TURN_DEADLINE_SECONDS` | no | `1800` | How long to follow one turn before telling the user to check Kanna. |
 
 Copy `.env.example` to `.env` for local use. Never commit it.
@@ -93,36 +94,78 @@ ZALO_BOT_TOKEN=... ZALO_WEBHOOK_SECRET=... \
 
 The script calls `setWebhook` and prints Zalo's `verification` result. It never prints the token. The secret must be the same value as `ZALO_WEBHOOK_SECRET` on the running service.
 
+## Roles
+
+The bot decides who is talking from the sender's Zalo id.
+
+| Sender | Messages go to | Commands |
+| --- | --- | --- |
+| Superadmin (`ZALO_SUPERADMIN_IDS`) | Their current directory (starts at `KANNA_DEFAULT_DIR`) | All of them |
+| Assigned user | Only the directory a superadmin assigned | `/help`, `/whoami`, `/new` |
+| Anyone else | Nothing | Gets "You don't have access to this bot yet. Your Zalo id is `<id>`" at most once per 24 hours |
+
+Every Zalo sender has their own Kanna conversation, even inside a group chat. Replies go back to the chat the message came from.
+
 ## Find your Zalo user id
 
-The allowlist is mandatory, so you need your own id before the bot answers you:
+1. Start the bridge with any placeholder in `ZALO_SUPERADMIN_IDS` (for example `0`).
+2. Send the bot a message from your Zalo account. It replies with "Your Zalo id is `<id>`", and the log shows `ignored message from unlisted user id <id> (<display name>)`.
+3. Put that id in `ZALO_SUPERADMIN_IDS` and restart.
 
-1. Start the bridge with any placeholder in `ZALO_ALLOWED_USER_IDS` (for example `0`).
-2. Send the bot a message from your Zalo account.
-3. Read the log line `ignored message from unlisted user id <id> (<display name>)`.
-4. Put that id in `ZALO_ALLOWED_USER_IDS` and restart.
+To give someone else access, ask them to message the bot once, then use `/users` to see their id and `/assign` to give them a directory.
 
 ## Commands
 
-- `/new` starts a fresh Kanna conversation for this Zalo chat. The next message opens a new Kanna chat in `KANNA_PROJECT_ID`.
+Commands are matched on the first word, case-insensitively, and handled by the bridge; they are never sent to Kanna. Any other text goes to the Kanna agent.
 
-Each Zalo chat is mapped to one Kanna chat, so follow-up messages continue the same conversation.
+| Command | Who | What it does |
+| --- | --- | --- |
+| `/help` | everyone | Lists the commands available to you. |
+| `/whoami` | everyone | Shows your role, Zalo id and directory. |
+| `/new` | everyone | Starts a fresh Kanna conversation. |
+| `/dir [path]` | superadmin | Shows or changes your own directory. Kanna creates it if missing. |
+| `/assign <zaloId> <path>` | superadmin | Gives a user access to one directory. Fails if Kanna cannot open it or it is outside `ZALO_USER_DIR_ROOT`. |
+| `/unassign <zaloId>` | superadmin | Removes a user. |
+| `/users` | superadmin | Lists assigned users and people who messaged the bot but are not assigned. |
+| `/approve [zaloId]` | superadmin | Approves the waiting tool request (a plan, for `ExitPlanMode`). |
+| `/deny [zaloId] [reason]` | superadmin | Denies it; for a plan the reason is sent back as feedback. |
+| `/answer [zaloId] <text>` | superadmin | Answers the first question of a waiting `AskUserQuestion`. |
+| `/mcp <tool> [json]` | superadmin | Calls any Kanna remote MCP tool and returns its text, e.g. `/mcp list_chats {"projectId":"..."}`. |
+
+Paths must be absolute (`/srv/data`) or start with `~/`. Relative paths are refused.
+
+A superadmin who runs `/approve`, `/deny` or `/answer` without an id acts on their own waiting conversation. When a user's turn is waiting, every superadmin who has messaged the bot in a private chat is notified with the request and `/approve <zaloId>`, `/deny <zaloId> <reason>`, `/answer <zaloId> <text>`. The id form works while the bridge keeps running; the pending request itself stays in Kanna.
+
+## Ask the bot in plain language
+
+Superadmin messages carry a short bridge preamble telling the agent it may manage users. The agent asks for an action by writing one line in its reply:
+
+```
+ZALO_BRIDGE_ACTION {"action":"assign","userId":"<zaloId>","dir":"<absolute path>"}
+```
+
+Supported actions are `assign {userId, dir}`, `unassign {userId}` and `set_dir {dir}`. The bridge removes these lines from the reply, runs them only when the turn belongs to a superadmin, and appends a confirmation or error for each. The same lines in a user's turn are removed, ignored and logged. This uses no extra Kanna tool.
 
 ## Security notes
 
-- **The allowlist is mandatory.** Messages drive a coding agent that has tool access on the machine Kanna runs on. An empty allowlist makes the bridge refuse to start, and messages from other users are ignored.
+- **Access is closed by default.** Unknown senders get one polite refusal per day and nothing reaches Kanna. An empty `ZALO_SUPERADMIN_IDS` makes the bridge refuse to start.
 - Requests are accepted only with the correct `X-Bot-Api-Secret-Token`, compared in constant time. Anything else gets `403` before the body is read.
-- **Permission prompts are never approved from Zalo.** When the agent needs approval the bridge tells you to open Kanna and stops following the turn.
+- Permission prompts are answered only by superadmins, with `/approve`, `/deny` or `/answer`.
 - Secrets (bot token, webhook secret, Kanna password) come only from the environment and are never logged.
 - Put the bridge behind HTTPS and keep the webhook path unguessable if you can.
 
 ## Limitations
 
+**Confinement is a bridge rule, not a sandbox.** The bridge guarantees that an assigned user's conversation always starts in their directory, that they cannot change it, and that they cannot run admin commands. It also tells the agent to stay inside that directory. It cannot stop the agent from reading or changing other files: Kanna runs the agent with the permissions of the Kanna server, and the bridge uses the Kanna admin password. A user who asks the agent to look elsewhere, or whose agent can use other MCP servers configured in Kanna, may succeed. Only assign people you would trust with the access of the machine Kanna runs on, or run Kanna itself in a container or VM if you need real isolation.
+
+- The same trust applies to superadmin turns: text the agent reads (a file, a web page) could make it print a `ZALO_BRIDGE_ACTION` line. Keep `ZALO_USER_DIR_ROOT` set so assignments stay in one tree.
 - Text messages only. Images, stickers and voice get a "not supported" reply.
-- Replies longer than 2000 characters are split into several messages (Zalo's limit), preferring newline or space boundaries.
+- Replies longer than 2000 characters are split into several messages (Zalo's limit), preferring newline or space boundaries. `/mcp` output is cut at about 6000 characters.
 - Updates arrive by webhook only; `getUpdates` polling is not used.
 - Replies are plain text; Zalo markdown or HTML rendering is not used.
-- Conversation mapping lives in a single JSON file, so run one instance.
+- State (conversations, users, assignments, who messaged the bot) lives in a single JSON file, so run one instance. An old version 1 state file is migrated on start; its conversations are dropped, so each person starts a fresh Kanna chat.
+- `/approve <zaloId>` needs the bridge to have seen that user's waiting turn since it started. After a restart, answer in Kanna.
+- Admin notifications about a waiting user go to each superadmin's most recent private chat with the bot, so a superadmin who has only used groups is not notified.
 
 ## Development
 

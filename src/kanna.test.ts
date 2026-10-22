@@ -57,6 +57,29 @@ function buildMcpServer(): McpServer {
         next: "reply to the user",
       }),
   )
+  server.registerTool("open_project", { inputSchema: { localPath: z.string() } }, async ({ localPath }) =>
+    jsonText({ projectId: `project:${localPath}` }),
+  )
+  server.registerTool("list_pending_tool_requests", { inputSchema: { chatId: z.string() } }, async ({ chatId }) =>
+    jsonText({
+      chatId,
+      status: "waiting_for_user",
+      pending: [
+        { kind: "tool_request", toolRequestId: "req-1", tool: "Bash", input: { command: "ls" } },
+        { kind: "interactive_tool", toolUseId: "tu-1", tool: "ExitPlanMode", input: { plan: "do it" } },
+      ],
+    }),
+  )
+  server.registerTool(
+    "answer_tool_request",
+    { inputSchema: { chatId: z.string(), toolRequestId: z.string(), decision: z.object({ kind: z.string(), reason: z.string().optional() }) } },
+    async ({ toolRequestId, decision }) => jsonText({ answered: toolRequestId, kind: decision.kind }),
+  )
+  server.registerTool(
+    "respond_tool",
+    { inputSchema: { chatId: z.string(), toolUseId: z.string(), result: z.object({ confirmed: z.boolean() }) } },
+    async ({ toolUseId, result }) => jsonText({ responded: toolUseId, confirmed: result.confirmed }),
+  )
   return server
 }
 
@@ -115,6 +138,35 @@ test("the Kanna MCP adapter authenticates with the bearer password and parses to
     })
     expect(waited.ok && waited.value.assistantText).toBe("resumed after 7")
     expect(missing).toEqual({ ok: false, error: "Chat missing was not found." })
+  } finally {
+    http.closeAllConnections()
+    http.close()
+  }
+})
+
+test("the Kanna MCP adapter opens projects, lists pending requests and answers them", async () => {
+  const http = await startFakeKanna()
+  const address = http.address()
+  if (address === null || typeof address === "string") throw new Error("fake Kanna server has no port")
+  const kanna = createKannaMcpApi({ url: `http://127.0.0.1:${address.port}/mcp`, password: PASSWORD })
+  try {
+    const opened = await kanna.openProject("~/Kanna/demo")
+    const listed = await kanna.listPendingToolRequests("chat-1")
+    const allowed = await kanna.answerToolRequest({ chatId: "chat-1", toolRequestId: "req-1", decision: { kind: "allow" } })
+    const confirmed = await kanna.respondTool({ chatId: "chat-1", toolUseId: "tu-1", result: { confirmed: true } })
+    const raw = await kanna.callTool("send_message", { chatId: "missing", content: "x" })
+
+    expect(opened).toEqual({ ok: true, value: "project:~/Kanna/demo" })
+    expect(listed).toEqual({
+      ok: true,
+      value: [
+        { kind: "tool_request", id: "req-1", tool: "Bash", input: { command: "ls" } },
+        { kind: "interactive_tool", id: "tu-1", tool: "ExitPlanMode", input: { plan: "do it" } },
+      ],
+    })
+    expect(allowed).toEqual({ ok: true, value: JSON.stringify({ answered: "req-1", kind: "allow" }) })
+    expect(confirmed).toEqual({ ok: true, value: JSON.stringify({ responded: "tu-1", confirmed: true }) })
+    expect(raw).toEqual({ ok: false, error: "Chat missing was not found." })
   } finally {
     http.closeAllConnections()
     http.close()
