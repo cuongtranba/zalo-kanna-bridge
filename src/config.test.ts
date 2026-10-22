@@ -40,3 +40,10 @@ test("BRIDGE_LANGUAGE accepts vi and refuses an unknown language", () => {
   expect(parseConfig(validEnv).language).toBe("en")
   expect(() => parseConfig({ ...validEnv, BRIDGE_LANGUAGE: "fr" })).toThrow(/BRIDGE_LANGUAGE/)
 })
+
+test("SESSION_IDLE_MINUTES defaults to 30, accepts 0 to disable and refuses values outside 0..10080", () => {
+  expect(parseConfig(validEnv).sessionIdleMinutes).toBe(30)
+  expect(parseConfig({ ...validEnv, SESSION_IDLE_MINUTES: "0" }).sessionIdleMinutes).toBe(0)
+  expect(() => parseConfig({ ...validEnv, SESSION_IDLE_MINUTES: "10081" })).toThrow(/SESSION_IDLE_MINUTES/)
+  expect(() => parseConfig({ ...validEnv, SESSION_IDLE_MINUTES: "-1" })).toThrow(/SESSION_IDLE_MINUTES/)
+})

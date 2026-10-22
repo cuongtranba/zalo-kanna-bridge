@@ -17,6 +17,7 @@ export interface Config {
   progressUpdateSeconds: number
   progressTypingSeconds: number
   progressAck: boolean
+  sessionIdleMinutes: number
   language: Language
 }
 
@@ -139,6 +140,7 @@ export function parseConfig(env: Env): Config {
   const progressUpdateSeconds = boundedInt(env, "PROGRESS_UPDATE_SECONDS", { fallback: 60, min: 15, max: 600 }, problems)
   const progressTypingSeconds = boundedInt(env, "PROGRESS_TYPING_SECONDS", { fallback: 5, min: 2, max: 30 }, problems)
   const progressAck = flag(env, "PROGRESS_ACK", true, problems)
+  const sessionIdleMinutes = boundedInt(env, "SESSION_IDLE_MINUTES", { fallback: 30, min: 0, max: 10080 }, problems)
   const bridgeLanguage = language(env, "BRIDGE_LANGUAGE", problems)
 
   const webhookPath = present(env, "WEBHOOK_PATH") ?? "/zalo/webhook"
@@ -166,6 +168,7 @@ export function parseConfig(env: Env): Config {
     progressUpdateSeconds,
     progressTypingSeconds,
     progressAck,
+    sessionIdleMinutes,
     language: bridgeLanguage,
   }
 }

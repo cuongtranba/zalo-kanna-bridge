@@ -7,6 +7,7 @@ import { isJsonObject, numberField, objectField, parseJson, stringField, type Js
 export interface Conversation {
   kannaChatId: string
   projectId: string
+  lastActiveAt?: number
 }
 
 export interface UserRecord {
@@ -75,7 +76,9 @@ function readVersionTwo(parsed: JsonObject): StateData {
   for (const [key, value] of entries(parsed, "conversations")) {
     const kannaChatId = stringField(value, "kannaChatId")
     const projectId = stringField(value, "projectId")
-    if (kannaChatId !== undefined && projectId !== undefined) data.conversations.set(key, { kannaChatId, projectId })
+    if (kannaChatId === undefined || projectId === undefined) continue
+    const lastActiveAt = numberField(value, "lastActiveAt")
+    data.conversations.set(key, { kannaChatId, projectId, ...(lastActiveAt === undefined ? {} : { lastActiveAt }) })
   }
   for (const [id, value] of entries(parsed, "users")) {
     const dir = stringField(value, "dir")

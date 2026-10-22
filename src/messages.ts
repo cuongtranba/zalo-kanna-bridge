@@ -18,6 +18,8 @@ export interface Messages {
   textOnly: string
   adminOnly: string
   received: string
+  newSessionAfterIdle: string
+  newConversationTip: string
   noAccess(zaloId: string): string
   stillWorking(tools: readonly string[]): string
 
@@ -95,6 +97,8 @@ export const en: Messages = {
   textOnly: "Only text messages are supported for now.",
   adminOnly: "That command is for admins only.",
   received: "Got it, working on it…",
+  newSessionAfterIdle: "It has been a while, so I started a new session. (Send /new to start a new session any time.)",
+  newConversationTip: "Tip: send /new any time to start a fresh session.",
   noAccess: (zaloId) =>
     `You don't have access to this bot yet. Your Zalo id is ${zaloId}. Ask an admin to give you access.`,
   stillWorking: (tools) => `Still working…${toolList(tools)}`,
@@ -182,6 +186,8 @@ export const vi: Messages = {
   textOnly: "Hiện bot mới chỉ hỗ trợ tin nhắn văn bản.",
   adminOnly: "Lệnh này chỉ dành cho quản trị viên.",
   received: "Đã nhận, đang xử lý…",
+  newSessionAfterIdle: "Đã lâu không nhắn nên mình bắt đầu phiên mới. (Gõ /new để tự bắt đầu phiên mới bất cứ lúc nào.)",
+  newConversationTip: "Mẹo: gõ /new bất cứ lúc nào để bắt đầu phiên mới.",
   noAccess: (zaloId) =>
     `Bạn chưa có quyền dùng bot này. Zalo id của bạn là ${zaloId}. Hãy nhờ admin cấp quyền.`,
   stillWorking: (tools) => `Vẫn đang làm…${toolList(tools)}`,

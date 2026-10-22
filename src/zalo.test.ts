@@ -132,6 +132,7 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
         progressUpdateSeconds: 60,
         progressTypingSeconds: 5,
         progressAck: false,
+        sessionIdleMinutes: 30,
       },
       kanna,
       zalo: createZaloApi({ token: TOKEN, baseUrl: server.baseUrl }),

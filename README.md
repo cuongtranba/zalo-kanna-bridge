@@ -54,6 +54,7 @@ All configuration is through environment variables, validated at startup. The br
 | `PROGRESS_POLL_SECONDS` | no | `15` | How long each call to Kanna waits (5–90) before the bridge looks at progress again. |
 | `PROGRESS_UPDATE_SECONDS` | no | `60` | Send a "Still working…" status when nothing has been sent to the user for this long (15–600). |
 | `PROGRESS_TYPING_SECONDS` | no | `5` | How often the typing indicator is refreshed while Kanna works (2–30). |
+| `SESSION_IDLE_MINUTES` | no | `30` | A person who has not been active in their Kanna conversation for this many minutes (0–10080) gets a new conversation on their next message. `0` turns this off. See "Idle sessions". |
 
 Copy `.env.example` to `.env` for local use. Never commit it.
 
@@ -110,6 +111,15 @@ A Kanna turn can take minutes, so for every message that goes to Kanna (not slas
 `/approve`, `/deny` and `/answer` resume a waiting turn with the same typing, streaming and status behaviour, but no acknowledgement. A failed typing action or acknowledgement is logged and never stops the turn.
 
 `ZALO_BRIDGE_ACTION` lines are removed from every piece before it is sent. They are run, for superadmin turns only, after the turn ends, and their confirmations are appended to the last message.
+
+## Idle sessions
+
+Each person keeps one Kanna conversation per Zalo chat until they send `/new` or their directory changes. So that unrelated questions do not pile into one long Kanna chat, the bridge starts a new conversation (in the sender's current project, exactly like `/new`) when a message for Kanna arrives and at least `SESSION_IDLE_MINUTES` have passed since the person was last active. The user is told once, in the same message as the acknowledgement: "It has been a while, so I started a new session. (Send /new to start a new session any time.)". The notice is sent even when `PROGRESS_ACK` is `false`.
+
+- "Active" is the last time a message for Kanna was accepted or its turn finished, so a long turn does not count as idle time. It is stored as `lastActiveAt` on the conversation in the state file.
+- A conversation saved before this feature existed has no `lastActiveAt` and is never reset by it; it gets one on its next message.
+- Slash commands do not refresh or reset the timer (except `/new`, which starts a new conversation). A conversation that is waiting for `/approve`, `/deny` or `/answer` is never reset for being idle.
+- The very first message that opens a person's conversation (none stored yet) has a short `/new` tip appended to the acknowledgement, so the tip is not sent when `PROGRESS_ACK` is `false`.
 
 ## Roles
 
