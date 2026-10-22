@@ -18,6 +18,7 @@ export interface Messages {
   textOnly: string
   adminOnly: string
   received: string
+  receivedInProject(title: string): string
   newSessionAfterIdle: string
   newConversationTip: string
   noAccess(zaloId: string): string
@@ -31,6 +32,8 @@ export interface Messages {
   whoami(role: RoleName, zaloId: string, dir: string): string
   noDirectory: string
   currentDir(dir: string): string
+  autoMode(defaultDir: string): string
+  backToAuto(defaultDir: string): string
   usageAssign: string
   usageUnassign: string
   usageAnswer: string
@@ -97,6 +100,7 @@ export const en: Messages = {
   textOnly: "Only text messages are supported for now.",
   adminOnly: "That command is for admins only.",
   received: "Got it, working on it…",
+  receivedInProject: (title) => `Received, opening a session in ${title}…`,
   newSessionAfterIdle: "It has been a while, so I started a new session. (Send /new to start a new session any time.)",
   newConversationTip: "Tip: send /new any time to start a fresh session.",
   noAccess: (zaloId) =>
@@ -110,7 +114,9 @@ export const en: Messages = {
     "/new - start a fresh Kanna conversation",
   ],
   helpAdmin: [
-    "/dir [path] - show or change your working directory",
+    "/dir [path] - show or change your working directory (this turns automatic project choice off)",
+    "/auto - let Kanna pick the project for each new session again",
+    "#<project> <message> - open the session in that project (title match, case-insensitive)",
     "/assign <zaloId> <path> - give a user access to a directory",
     "/unassign <zaloId> - remove a user",
     "/users - assigned users and people who messaged the bot",
@@ -124,6 +130,9 @@ export const en: Messages = {
   whoami: (role, zaloId, dir) => `Role: ${role}\nZalo id: ${zaloId}\nDirectory: ${dir}`,
   noDirectory: "none",
   currentDir: (dir) => `Current directory: ${dir}`,
+  autoMode: (defaultDir) => `auto (Kanna picks the project for each new session; fallback ${defaultDir})`,
+  backToAuto: (defaultDir) =>
+    `Back to auto: Kanna picks the project for each new session, falling back to ${defaultDir}. Your next message starts a new Kanna conversation.`,
   usageAssign: "Usage: /assign <zaloId> <path>",
   usageUnassign: "Usage: /unassign <zaloId>",
   usageAnswer: "Usage: /answer [zaloId] <text>",
@@ -186,6 +195,7 @@ export const vi: Messages = {
   textOnly: "Hiện bot mới chỉ hỗ trợ tin nhắn văn bản.",
   adminOnly: "Lệnh này chỉ dành cho quản trị viên.",
   received: "Đã nhận, đang xử lý…",
+  receivedInProject: (title) => `Đã nhận, mở phiên trong dự án ${title}…`,
   newSessionAfterIdle: "Đã lâu không nhắn nên mình bắt đầu phiên mới. (Gõ /new để tự bắt đầu phiên mới bất cứ lúc nào.)",
   newConversationTip: "Mẹo: gõ /new bất cứ lúc nào để bắt đầu phiên mới.",
   noAccess: (zaloId) =>
@@ -199,7 +209,9 @@ export const vi: Messages = {
     "/new - bắt đầu cuộc trò chuyện mới với Kanna",
   ],
   helpAdmin: [
-    "/dir [đường dẫn] - xem hoặc đổi thư mục làm việc của bạn",
+    "/dir [đường dẫn] - xem hoặc đổi thư mục làm việc của bạn (tắt chế độ tự chọn dự án)",
+    "/auto - để Kanna tự chọn dự án cho mỗi phiên mới trở lại",
+    "#<dự án> <nội dung> - mở phiên trong dự án đó (khớp đúng tên, không phân biệt hoa thường)",
     "/assign <zaloId> <đường dẫn> - cấp cho một người dùng quyền vào một thư mục",
     "/unassign <zaloId> - gỡ quyền của một người dùng",
     "/users - người dùng đã được cấp quyền và những người từng nhắn cho bot",
@@ -214,6 +226,9 @@ export const vi: Messages = {
     `Vai trò: ${role === "superadmin" ? "quản trị viên (superadmin)" : "người dùng"}\nZalo id: ${zaloId}\nThư mục: ${dir}`,
   noDirectory: "chưa có",
   currentDir: (dir) => `Thư mục hiện tại: ${dir}`,
+  autoMode: (defaultDir) => `tự động (Kanna chọn dự án cho mỗi phiên mới; mặc định ${defaultDir})`,
+  backToAuto: (defaultDir) =>
+    `Đã về chế độ tự động: Kanna chọn dự án cho mỗi phiên mới, nếu không rõ thì dùng ${defaultDir}. Tin nhắn tiếp theo sẽ bắt đầu cuộc trò chuyện mới với Kanna.`,
   usageAssign: "Cách dùng: /assign <zaloId> <đường dẫn>",
   usageUnassign: "Cách dùng: /unassign <zaloId>",
   usageAnswer: "Cách dùng: /answer [zaloId] <nội dung>",

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { mkdir, rename, writeFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { consoleLogger, type Logger } from "./log"
-import { isJsonObject, numberField, objectField, parseJson, stringField, type JsonObject } from "./json"
+import { booleanField, isJsonObject, numberField, objectField, parseJson, stringField, type JsonObject } from "./json"
 
 export interface Conversation {
   kannaChatId: string
@@ -20,6 +20,7 @@ export interface UserRecord {
 
 export interface AdminRecord {
   dir?: string
+  dirExplicit?: boolean
   projectDir?: string
   projectId?: string
   chatId?: string
@@ -93,8 +94,10 @@ function readVersionTwo(parsed: JsonObject): StateData {
     })
   }
   for (const [id, value] of entries(parsed, "admins")) {
+    const dirExplicit = booleanField(value, "dirExplicit")
     data.admins.set(id, {
       ...optionalString(value, "dir"),
+      ...(dirExplicit === undefined ? {} : { dirExplicit }),
       ...optionalString(value, "projectDir"),
       ...optionalString(value, "projectId"),
       ...optionalString(value, "chatId"),

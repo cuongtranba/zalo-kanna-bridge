@@ -105,6 +105,12 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
     async openProject() {
       return { ok: true, value: "project-1" }
     },
+    async listProjects() {
+      return { ok: false, error: "unexpected project list" }
+    },
+    async archiveChat() {
+      return { ok: false, error: "unexpected archive" }
+    },
     async callTool() {
       return { ok: false, error: "unexpected tool call" }
     },
@@ -133,6 +139,9 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
         progressTypingSeconds: 5,
         progressAck: false,
         sessionIdleMinutes: 30,
+        routerEnabled: false,
+        routerModel: "haiku",
+        routerTimeoutSeconds: 60,
       },
       kanna,
       zalo: createZaloApi({ token: TOKEN, baseUrl: server.baseUrl }),

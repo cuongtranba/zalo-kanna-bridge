@@ -44,12 +44,20 @@ export interface ToolDecision {
   reason?: string
 }
 
+export interface KannaProject {
+  projectId: string
+  title: string
+  localPath: string
+}
+
 export interface SendMessageArgs {
   chatId?: string
   projectId?: string
   content: string
   idempotencyKey: string
   timeoutSeconds: number
+  model?: string
+  wait?: boolean
 }
 
 export interface WaitForChatArgs {
@@ -74,6 +82,8 @@ export interface KannaApi {
   sendMessage(args: SendMessageArgs): Promise<KannaCallResult>
   waitForChat(args: WaitForChatArgs): Promise<KannaCallResult>
   openProject(localPath: string): Promise<KannaOutcome<string>>
+  listProjects(): Promise<KannaOutcome<KannaProject[]>>
+  archiveChat(chatId: string): Promise<KannaOutcome<string>>
   callTool(name: string, args: JsonObject): Promise<KannaOutcome<string>>
   listPendingToolRequests(chatId: string): Promise<KannaOutcome<PendingRequest[]>>
   answerToolRequest(args: AnswerToolRequestArgs): Promise<KannaOutcome<string>>
@@ -132,6 +142,26 @@ export function parseKannaResult(value: JsonValue): KannaResult | undefined {
     duplicate: booleanField(value, "duplicate") ?? false,
     queued: booleanField(value, "queued") ?? false,
   }
+}
+
+function parseProject(value: JsonValue): KannaProject | undefined {
+  if (!isJsonObject(value)) return undefined
+  const projectId = stringField(value, "projectId") ?? stringField(value, "id")
+  if (projectId === undefined) return undefined
+  const localPath = stringField(value, "localPath") ?? stringField(value, "path") ?? ""
+  return { projectId, title: stringField(value, "title") ?? (localPath || projectId), localPath }
+}
+
+export function parseProjects(value: JsonValue): KannaProject[] | undefined {
+  if (!isJsonObject(value)) return undefined
+  const projects = arrayField(value, "projects")
+  if (projects === undefined) return undefined
+  const parsed: KannaProject[] = []
+  for (const item of projects) {
+    const project = parseProject(item)
+    if (project !== undefined) parsed.push(project)
+  }
+  return parsed
 }
 
 function parsePendingRequest(value: JsonValue): PendingRequest | undefined {
@@ -244,6 +274,8 @@ export function createKannaMcpApi(options: KannaMcpOptions): KannaApi {
       }
       if (args.chatId !== undefined) body["chatId"] = args.chatId
       if (args.projectId !== undefined) body["projectId"] = args.projectId
+      if (args.model !== undefined) body["model"] = args.model
+      if (args.wait !== undefined) body["wait"] = args.wait
       return call("send_message", body, args.timeoutSeconds)
     },
     waitForChat(args) {
@@ -259,6 +291,17 @@ export function createKannaMcpApi(options: KannaMcpOptions): KannaApi {
       const projectId = parsed !== undefined && isJsonObject(parsed) ? stringField(parsed, "projectId") : undefined
       if (projectId === undefined) throw new Error("Kanna open_project returned an unexpected result")
       return { ok: true, value: projectId }
+    },
+    async listProjects() {
+      const output = await callText("list_projects", {})
+      if (!output.ok) return output
+      const parsed = parseJson(output.value)
+      const projects = parsed === undefined ? undefined : parseProjects(parsed)
+      if (projects === undefined) throw new Error("Kanna list_projects returned an unexpected result")
+      return { ok: true, value: projects }
+    },
+    archiveChat(chatId) {
+      return callText("archive_chat", { chatId })
     },
     async listPendingToolRequests(chatId) {
       const output = await callText("list_pending_tool_requests", { chatId })

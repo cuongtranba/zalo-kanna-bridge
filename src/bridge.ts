@@ -4,10 +4,11 @@ import { ADMIN_COMMANDS, helpText, parseCommand, stripBotMention, type ParsedCom
 import type { Config } from "./config"
 import { extractDirectives, runDirective, type ParsedDirective } from "./directives"
 import { errorMessage, isJsonObject, parseJson } from "./json"
-import type { KannaApi, KannaResult } from "./kanna"
+import type { KannaApi, KannaOutcome, KannaResult } from "./kanna"
 import { consoleLogger, type Logger } from "./log"
 import { MESSAGES, type Messages } from "./messages"
 import { adminPreamble, userPreamble } from "./preamble"
+import { createRouter } from "./router"
 import { resolveSender } from "./roles"
 import type { BridgeStore } from "./state"
 import { SECRET_HEADER, TEXT_EVENT, isKnownEvent, parseUpdate, verifySecret, type ZaloApi, type ZaloMessage, type ZaloUpdate } from "./zalo"
@@ -27,6 +28,9 @@ export type BridgeConfig = Pick<
   | "progressTypingSeconds"
   | "progressAck"
   | "sessionIdleMinutes"
+  | "routerEnabled"
+  | "routerModel"
+  | "routerTimeoutSeconds"
 > & { botDisplayName?: string | undefined }
 
 export interface Scheduler {
@@ -67,6 +71,15 @@ interface TurnOpening {
   ack: boolean
   notice?: string
   tip?: boolean
+}
+
+type Announce = (projectTitle?: string) => Promise<void>
+
+interface Placement {
+  dir: string
+  projectId: string
+  text: string
+  projectTitle?: string
 }
 
 type Role = "superadmin" | "user"
@@ -138,6 +151,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const messages = deps.messages ?? MESSAGES
   const scheduler = deps.scheduler ?? realScheduler
   const admin = createAdminOps({ config, kanna, messages, store, now })
+  const router = createRouter({ kanna, config, log, now })
 
   const pending = new Set<Promise<void>>()
   const tails = new Map<string, Promise<void>>()
@@ -258,14 +272,47 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return { kind: "reply", text: joinParagraphs(held), directives }
   }
 
-  async function runTurn(who: Participant, messageId: string, text: string, progress: TurnProgress): Promise<Turn> {
+  async function placeTurn(who: Participant, messageId: string, text: string): Promise<KannaOutcome<Placement>> {
+    if (who.role === "user") {
+      const workspace = await admin.workspaceFor(who.role, who.fromId)
+      return workspace.ok ? { ok: true, value: { ...workspace.value, text } } : workspace
+    }
+    const chosen = await router.override(text)
+    if (chosen !== undefined) {
+      const { project } = chosen
+      return {
+        ok: true,
+        value: { dir: project.localPath, projectId: project.projectId, text: chosen.text, projectTitle: project.title },
+      }
+    }
     const workspace = await admin.workspaceFor(who.role, who.fromId)
-    if (!workspace.ok) return { kind: "kanna_error", error: workspace.error }
-    const { dir, projectId } = workspace.value
+    if (!workspace.ok) return workspace
+    const placement: Placement = { ...workspace.value, text }
+    if (!config.routerEnabled || admin.explicitDir(who.fromId) !== undefined) return { ok: true, value: placement }
+    const stored = store.getConversation(who.convKey)
+    if (stored !== undefined) return { ok: true, value: { ...placement, projectId: stored.projectId } }
+    const decision = await router.route(messageId, text, workspace.value)
+    return {
+      ok: true,
+      value: { ...placement, projectId: decision.project.projectId, projectTitle: decision.project.title },
+    }
+  }
+
+  async function runTurn(
+    who: Participant,
+    messageId: string,
+    text: string,
+    progress: TurnProgress,
+    announce: Announce,
+  ): Promise<Turn> {
+    const placed = await placeTurn(who, messageId, text)
+    if (!placed.ok) return { kind: "kanna_error", error: placed.error }
+    const { dir, projectId, projectTitle } = placed.value
+    await announce(projectTitle)
     const content =
       who.role === "user"
-        ? userPreamble(who.name, dir, text)
-        : adminPreamble(who.name, admin.knownUsers(KNOWN_USERS_IN_PREAMBLE), text)
+        ? userPreamble(who.name, dir, placed.value.text)
+        : adminPreamble(who.name, admin.knownUsers(KNOWN_USERS_IN_PREAMBLE), placed.value.text)
     const base = { content, idempotencyKey: `zalo:${messageId}`, timeoutSeconds: config.progressPollSeconds }
     const openInProject = () => kanna.sendMessage({ ...base, projectId })
 
@@ -369,20 +416,28 @@ export function createBridge(deps: BridgeDeps): Bridge {
     await say(who.chatId, text || messages.emptyReply)
   }
 
+  function openingText(options: TurnOpening, projectTitle: string | undefined): string {
+    let acknowledgement = ""
+    if (options.ack && projectTitle !== undefined) acknowledgement = messages.receivedInProject(projectTitle)
+    else if (options.ack && config.progressAck) acknowledgement = messages.received
+    const tip = options.ack && options.tip && config.progressAck ? messages.newConversationTip : ""
+    return joinParagraphs([options.notice ?? "", acknowledgement, tip])
+  }
+
   async function followWithTyping(
     who: Participant,
     options: TurnOpening,
     progress: TurnProgress,
-    start: () => Promise<Turn>,
+    start: (announce: Announce) => Promise<Turn>,
   ): Promise<Turn> {
     await typing(who.chatId)
-    const acknowledgement =
-      options.ack && config.progressAck ? joinParagraphs([messages.received, options.tip ? messages.newConversationTip : ""]) : ""
-    const opening = joinParagraphs([options.notice ?? "", acknowledgement])
-    if (opening !== "") await sayDuringTurn(who, progress, opening)
+    const announce: Announce = async (projectTitle) => {
+      const opening = openingText(options, projectTitle)
+      if (opening !== "") await sayDuringTurn(who, progress, opening)
+    }
     const stopTyping = scheduler.every(config.progressTypingSeconds * 1000, () => void typing(who.chatId))
     try {
-      return await start()
+      return await start(announce)
     } finally {
       stopTyping()
     }
@@ -391,12 +446,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
   async function followAndDeliver(
     who: Participant,
     options: TurnOpening,
-    start: (progress: TurnProgress) => Promise<Turn>,
+    start: (progress: TurnProgress, announce: Announce) => Promise<Turn>,
   ): Promise<void> {
     const progress: TurnProgress = { lastSentAt: now(), answeredInPieces: false, tools: [] }
     let turn: Turn
     try {
-      turn = await followWithTyping(who, options, progress, () => start(progress))
+      turn = await followWithTyping(who, options, progress, (announce) => start(progress, announce))
     } catch (error) {
       log.error(`Kanna call failed: ${errorMessage(error)}`)
       await say(who.chatId, messages.unreachable)
@@ -476,7 +531,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       case "whoami": {
         const dir =
           who.role === "superadmin"
-            ? admin.currentDir(who.fromId)
+            ? admin.describeDir(who.fromId)
             : (store.getUser(who.fromId)?.dir ?? messages.noDirectory)
         return messages.whoami(who.role, who.fromId, dir)
       }
@@ -485,8 +540,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
         waiting.delete(who.convKey)
         return messages.newConversation
       case "dir":
-        if (command.rest === "") return messages.currentDir(admin.currentDir(who.fromId))
+        if (command.rest === "") return messages.currentDir(admin.describeDir(who.fromId))
         return (await admin.setDir(who.fromId, command.rest)).text
+      case "auto":
+        await store.deleteConversation(who.convKey)
+        waiting.delete(who.convKey)
+        return (await admin.clearDir(who.fromId)).text
       case "assign": {
         const [userId = ""] = command.rest.split(/\s+/)
         const dir = command.rest.slice(userId.length).trim()
@@ -528,7 +587,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return
     }
     const opening = await openingFor(who)
-    await followAndDeliver(who, opening, (progress) => runTurn(who, messageId, text, progress))
+    await followAndDeliver(who, opening, (progress, announce) => runTurn(who, messageId, text, progress, announce))
   }
 
   async function handleUnknown(message: ZaloMessage): Promise<void> {

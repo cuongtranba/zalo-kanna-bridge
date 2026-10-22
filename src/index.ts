@@ -13,6 +13,7 @@ export type {
   KannaCallResult,
   KannaMcpOptions,
   KannaOutcome,
+  KannaProject,
   KannaResult,
   PendingRequest,
   RespondToolArgs,

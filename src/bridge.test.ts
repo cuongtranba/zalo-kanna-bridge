@@ -11,6 +11,7 @@ import {
   type Bridge,
   type KannaApi,
   type KannaCallResult,
+  type KannaProject,
   type KannaResult,
   type Logger,
   type Messages,
@@ -68,6 +69,10 @@ interface FakeKanna extends KannaApi {
   answers: AnswerToolRequestArgs[]
   responses: RespondToolArgs[]
   pendingRequests: PendingRequest[]
+  projects: KannaProject[]
+  listings: number
+  archived: string[]
+  routerAnswer: string
 }
 
 interface KannaScript {
@@ -78,6 +83,7 @@ interface KannaScript {
 
 function createFakeKanna(script: KannaScript = {}): FakeKanna {
   let openedChats = 0
+  let routerChats = 0
   const fake: FakeKanna = {
     sends: [],
     waits: [],
@@ -86,8 +92,16 @@ function createFakeKanna(script: KannaScript = {}): FakeKanna {
     answers: [],
     responses: [],
     pendingRequests: [],
+    projects: [],
+    listings: 0,
+    archived: [],
+    routerAnswer: "",
     async sendMessage(args) {
       fake.sends.push(args)
+      if (args.model !== undefined) {
+        routerChats += 1
+        return kannaResult({ chatId: `router-chat-${routerChats}`, assistantText: fake.routerAnswer })
+      }
       script.timeline?.push("kanna:send")
       if (args.projectId !== undefined) openedChats += 1
       if (script.send) return script.send(args, openedChats)
@@ -105,6 +119,14 @@ function createFakeKanna(script: KannaScript = {}): FakeKanna {
     async openProject(path) {
       fake.opened.push(path)
       return { ok: true, value: `project:${path}` }
+    },
+    async listProjects() {
+      fake.listings += 1
+      return { ok: true, value: fake.projects }
+    },
+    async archiveChat(chatId) {
+      fake.archived.push(chatId)
+      return { ok: true, value: "{}" }
     },
     async callTool(name, args) {
       fake.tools.push({ name, args })
@@ -186,6 +208,7 @@ interface BridgeOptions {
   scheduler?: Scheduler
   ack?: boolean
   idleMinutes?: number
+  router?: boolean
 }
 
 function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: BridgeOptions = {}): Bridge {
@@ -202,6 +225,9 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: B
       progressTypingSeconds: 5,
       progressAck: options.ack ?? false,
       sessionIdleMinutes: options.idleMinutes ?? 30,
+      routerEnabled: options.router ?? false,
+      routerModel: "haiku",
+      routerTimeoutSeconds: 60,
       botDisplayName: BOT_NAME,
     },
     kanna,
@@ -916,4 +942,130 @@ test("a conversation saved before idle tracking existed is continued, not reset,
 
   expect(kanna.sends.map((send) => [send.projectId, send.chatId])).toEqual([[undefined, "old-chat"]])
   expect(textsTo(zalo, "zalo-chat-1")).toEqual(["echo: after the deploy"])
+})
+
+const VK: KannaProject = { projectId: "p-vk", title: "vk", localPath: "/Users/cuong/repo/vk" }
+const KANNA_REPO: KannaProject = { projectId: "p-kanna", title: "kanna", localPath: "/Users/cuong/Desktop/repo/kanna" }
+
+function routingKanna(routerAnswer: string): FakeKanna {
+  const kanna = createFakeKanna()
+  kanna.projects = [VK, KANNA_REPO]
+  kanna.routerAnswer = routerAnswer
+  return kanna
+}
+
+const routerSends = (kanna: FakeKanna) => kanna.sends.filter((send) => send.model !== undefined)
+const sessionSends = (kanna: FakeKanna) => kanna.sends.filter((send) => send.model === undefined)
+
+test("a superadmin's first message is routed to the project Kanna picks, the router chat is archived and the reply names the project", async () => {
+  const kanna = routingKanna('{"projectId":"p-vk"}')
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+
+  await say(bridge, { text: "how do I close the month?" })
+
+  expect(routerSends(kanna)).toHaveLength(1)
+  expect(routerSends(kanna)[0]).toMatchObject({
+    projectId: `project:${DEFAULT_DIR}`,
+    model: "haiku",
+    wait: true,
+    timeoutSeconds: 60,
+  })
+  expect(routerSends(kanna)[0]?.content).toContain("p-vk | vk | /Users/cuong/repo/vk")
+  expect(sessionSends(kanna).map((send) => [send.projectId, send.chatId])).toEqual([["p-vk", undefined]])
+  expect(kanna.archived).toEqual(["router-chat-1"])
+  expect(zalo.sent.map((message) => message.text)).toEqual([
+    "Received, opening a session in vk…",
+    "echo: how do I close the month?",
+  ])
+})
+
+test("a follow-up inside the session stays in the routed project and does not run the router again", async () => {
+  const kanna = routingKanna('{"projectId":"p-vk"}')
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+
+  await say(bridge, { text: "first" })
+  await say(bridge, { text: "second" })
+
+  expect(routerSends(kanna)).toHaveLength(1)
+  expect(sessionSends(kanna).map((send) => [send.projectId, send.chatId])).toEqual([
+    ["p-vk", undefined],
+    [undefined, "kanna-chat-1"],
+  ])
+  expect(zalo.sent.map((message) => message.text)).toEqual([
+    "Received, opening a session in vk…",
+    "echo: first",
+    "echo: second",
+  ])
+})
+
+test("a router answer of null, garbage or an id outside the list opens the session in the default directory's project", async () => {
+  for (const answer of ['{"projectId":null}', "I think it is the vk one", '{"projectId":"p-nope"}']) {
+    const kanna = routingKanna(answer)
+    const zalo = createFakeZalo()
+    const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+
+    await say(bridge, { text: "something vague" })
+
+    expect(sessionSends(kanna).map((send) => send.projectId)).toEqual([`project:${DEFAULT_DIR}`])
+    expect(kanna.archived).toEqual(["router-chat-1"])
+    expect(textsTo(zalo, "zalo-chat-1")[0]).toBe("Received, opening a session in stuff…")
+  }
+})
+
+test("a #title prefix opens the session in that project without the router and Kanna never sees the prefix", async () => {
+  const kanna = routingKanna('{"projectId":"p-kanna"}')
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+
+  await say(bridge, { text: "#VK hello" })
+
+  expect(routerSends(kanna)).toEqual([])
+  expect(kanna.archived).toEqual([])
+  expect(sessionSends(kanna).map((send) => send.projectId)).toEqual(["p-vk"])
+  expect(userPart(sessionSends(kanna)[0]?.content ?? "")).toBe("hello")
+  expect(zalo.sent.map((message) => message.text)).toEqual(["Received, opening a session in vk…", "echo: hello"])
+})
+
+test("after /dir the superadmin is not routed, and /auto brings routing back", async () => {
+  const kanna = routingKanna('{"projectId":"p-vk"}')
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+
+  await say(bridge, { text: "/dir /x" })
+  await say(bridge, { text: "pinned" })
+  const routedWhilePinned = routerSends(kanna).length
+  await say(bridge, { text: "/auto" })
+  await say(bridge, { text: "/dir" })
+  await say(bridge, { text: "routed again" })
+
+  expect(routedWhilePinned).toBe(0)
+  expect(routerSends(kanna)).toHaveLength(1)
+  expect(sessionSends(kanna).map((send) => send.projectId)).toEqual(["project:/x", "p-vk"])
+  expect(textsTo(zalo, "zalo-chat-1").find((text) => text.startsWith("Current directory:"))).toContain("auto")
+})
+
+test("an assigned user is never routed and never triggers a project listing", async () => {
+  const kanna = routingKanna('{"projectId":"p-vk"}')
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { router: true })
+  await assign(bridge, USER_A, "~/Kanna/alice")
+
+  await say(bridge, { fromId: USER_A, chatId: "user-chat", text: "#vk hello" })
+
+  expect(kanna.listings).toBe(0)
+  expect(routerSends(kanna)).toEqual([])
+  expect(sessionSends(kanna).map((send) => send.projectId)).toEqual(["project:~/Kanna/alice"])
+  expect(textsTo(zalo, "user-chat")).toEqual(["echo: #vk hello"])
+})
+
+test("with the router disabled a superadmin's session opens in the default directory and the router is never called", async () => {
+  const kanna = routingKanna('{"projectId":"p-vk"}')
+  const bridge = newBridge(kanna, createFakeZalo(), await newStateFile(), { router: false })
+
+  await say(bridge, { text: "anything" })
+
+  expect(routerSends(kanna)).toEqual([])
+  expect(sessionSends(kanna).map((send) => send.projectId)).toEqual([`project:${DEFAULT_DIR}`])
 })
