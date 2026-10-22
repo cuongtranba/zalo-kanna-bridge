@@ -194,7 +194,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
       if (request.method !== "POST") {
         return new Response("method not allowed", { status: 405, headers: { Allow: "POST" } })
       }
-      if (!verifySecret(request.headers.get(SECRET_HEADER), config.webhookSecret)) {
+      const presentedSecret = request.headers.get(SECRET_HEADER)
+      if (!verifySecret(presentedSecret, config.webhookSecret)) {
+        const reason = presentedSecret === null ? "missing" : `wrong (length ${presentedSecret.length})`
+        const agent = request.headers.get("user-agent") ?? "none"
+        log.info(`rejected webhook: ${SECRET_HEADER} ${reason}; user-agent ${agent}`)
         return new Response("forbidden", { status: 403 })
       }
       const body = parseJson(await request.text())
