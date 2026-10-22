@@ -121,24 +121,22 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, log?: Logg
 
 function deliver(
   bridge: Bridge,
-  update: { messageId: string; text?: string; event?: string; fromId?: string; displayName?: string },
+  update: { messageId: string; text?: string; event?: string; fromId?: string; displayName?: string; unwrapped?: boolean },
   secret: string | null = SECRET,
 ): Promise<Response> {
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (secret !== null) headers["X-Bot-Api-Secret-Token"] = secret
-  const body = {
-    ok: true,
-    result: {
-      event_name: update.event ?? "message.text.received",
-      message: {
-        from: { id: update.fromId ?? ALLOWED_USER, display_name: update.displayName ?? "Tester" },
-        chat: { id: "zalo-chat-1", chat_type: "PRIVATE" },
-        text: update.text ?? "hello",
-        message_id: update.messageId,
-        date: 1700000000,
-      },
+  const result = {
+    event_name: update.event ?? "message.text.received",
+    message: {
+      from: { id: update.fromId ?? ALLOWED_USER, display_name: update.displayName ?? "Tester" },
+      chat: { id: "zalo-chat-1", chat_type: "PRIVATE" },
+      text: update.text ?? "hello",
+      message_id: update.messageId,
+      date: 1700000000,
     },
   }
+  const body = update.unwrapped ? result : { ok: true, result }
   return bridge.fetch(
     new Request("http://bridge.test/zalo/webhook", { method: "POST", headers, body: JSON.stringify(body) }),
   )
@@ -182,6 +180,17 @@ test("a text opens a Kanna chat in the project and the next one continues it, ev
     "echo: second question",
     "echo: third question",
   ])
+})
+
+test("an update posted without the { ok, result } wrapper is handled like a wrapped one", async () => {
+  const kanna = createFakeKanna()
+  const zalo = createFakeZalo()
+  const bridge = newBridge(kanna, zalo, await newStateFile())
+
+  await deliver(bridge, { messageId: "m1", text: "bare update", unwrapped: true })
+  await bridge.idle()
+
+  expect(zalo.sent).toEqual([{ chatId: "zalo-chat-1", text: "echo: bare update" }])
 })
 
 test("a message from a user outside the allowlist is ignored but its id is logged", async () => {

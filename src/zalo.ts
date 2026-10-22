@@ -62,8 +62,7 @@ function idField(object: JsonObject, key: string): string | undefined {
 
 export function parseUpdate(body: JsonValue): ZaloUpdate | undefined {
   if (!isJsonObject(body)) return undefined
-  const result = objectField(body, "result")
-  if (result === undefined) return undefined
+  const result = objectField(body, "result") ?? body
   const eventName = stringField(result, "event_name")
   const message = objectField(result, "message")
   if (eventName === undefined || message === undefined) return undefined
