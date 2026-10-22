@@ -35,6 +35,11 @@ export function objectField(object: JsonObject, key: string): JsonObject | undef
   return isJsonObject(value) ? value : undefined
 }
 
+export function arrayField(object: JsonObject, key: string): JsonValue[] | undefined {
+  const value = object[key]
+  return Array.isArray(value) ? value : undefined
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

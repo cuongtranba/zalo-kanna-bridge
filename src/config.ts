@@ -1,10 +1,13 @@
+import { normalizeDir } from "./roles"
+
 export interface Config {
   zaloBotToken: string
   webhookSecret: string
   kannaMcpUrl: string
   kannaPassword: string
-  kannaProjectId: string
-  allowedUserIds: ReadonlySet<string>
+  superadminIds: ReadonlySet<string>
+  kannaDefaultDir: string
+  userDirRoot?: string
   port: number
   webhookPath: string
   stateFile: string
@@ -20,9 +23,16 @@ const REQUIRED_VARS = [
   "ZALO_WEBHOOK_SECRET",
   "KANNA_MCP_URL",
   "KANNA_PASSWORD",
-  "KANNA_PROJECT_ID",
-  "ZALO_ALLOWED_USER_IDS",
+  "ZALO_SUPERADMIN_IDS",
+  "KANNA_DEFAULT_DIR",
 ] as const
+
+const RENAMED_VARS = [
+  { old: "ZALO_ALLOWED_USER_IDS", replacement: "ZALO_SUPERADMIN_IDS" },
+  { old: "KANNA_PROJECT_ID", replacement: "KANNA_DEFAULT_DIR" },
+] as const
+
+const DIR_HINT = "must be an absolute path (/...) or start with ~/"
 
 function present(env: Env, name: string): string | undefined {
   const value = env[name]?.trim()
@@ -42,8 +52,14 @@ function positiveInt(env: Env, name: string, fallback: number, problems: string[
 
 export function parseConfig(env: Env): Config {
   const missing = REQUIRED_VARS.filter((name) => present(env, name) === undefined)
-  if (missing.length > 0) {
-    throw new ConfigError(`Missing required environment variables: ${missing.join(", ")}`)
+  const renamed = RENAMED_VARS.filter(
+    ({ old, replacement }) => present(env, old) !== undefined && present(env, replacement) === undefined,
+  ).map(({ old, replacement }) => `${old} was replaced by ${replacement}; set ${replacement} and remove ${old}`)
+  if (missing.length > 0 || renamed.length > 0) {
+    const parts: string[] = []
+    if (missing.length > 0) parts.push(`Missing required environment variables: ${missing.join(", ")}`)
+    parts.push(...renamed)
+    throw new ConfigError(parts.join(". "))
   }
 
   const problems: string[] = []
@@ -52,15 +68,22 @@ export function parseConfig(env: Env): Config {
     problems.push("ZALO_WEBHOOK_SECRET must be 8 to 256 characters")
   }
 
-  const allowedUserIds = new Set(
-    (present(env, "ZALO_ALLOWED_USER_IDS") ?? "")
+  const superadminIds = new Set(
+    (present(env, "ZALO_SUPERADMIN_IDS") ?? "")
       .split(",")
       .map((id) => id.trim())
       .filter((id) => id.length > 0),
   )
-  if (allowedUserIds.size === 0) {
-    problems.push("ZALO_ALLOWED_USER_IDS must list at least one Zalo user id")
+  if (superadminIds.size === 0) {
+    problems.push("ZALO_SUPERADMIN_IDS must list at least one Zalo user id")
   }
+
+  const kannaDefaultDir = normalizeDir(present(env, "KANNA_DEFAULT_DIR") ?? "")
+  if (kannaDefaultDir === undefined) problems.push(`KANNA_DEFAULT_DIR ${DIR_HINT}`)
+
+  const rawRoot = present(env, "ZALO_USER_DIR_ROOT")
+  const userDirRoot = rawRoot === undefined ? undefined : normalizeDir(rawRoot)
+  if (rawRoot !== undefined && userDirRoot === undefined) problems.push(`ZALO_USER_DIR_ROOT ${DIR_HINT}`)
 
   const kannaMcpUrl = present(env, "KANNA_MCP_URL") ?? ""
   if (!URL.canParse(kannaMcpUrl)) {
@@ -84,8 +107,9 @@ export function parseConfig(env: Env): Config {
     webhookSecret,
     kannaMcpUrl,
     kannaPassword: present(env, "KANNA_PASSWORD") ?? "",
-    kannaProjectId: present(env, "KANNA_PROJECT_ID") ?? "",
-    allowedUserIds,
+    superadminIds,
+    kannaDefaultDir: kannaDefaultDir ?? "",
+    userDirRoot,
     port,
     webhookPath,
     stateFile: present(env, "STATE_FILE") ?? "./data/state.json",

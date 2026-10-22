@@ -26,6 +26,7 @@ export interface ZaloMessage {
   fromId: string
   displayName: string
   chatId: string
+  chatType: string | undefined
   messageId: string
   text: string | undefined
 }
@@ -79,6 +80,7 @@ export function parseUpdate(body: JsonValue): ZaloUpdate | undefined {
       fromId,
       displayName: stringField(from, "display_name") ?? "unknown",
       chatId,
+      chatType: stringField(chat, "chat_type"),
       messageId,
       text: stringField(message, "text"),
     },
