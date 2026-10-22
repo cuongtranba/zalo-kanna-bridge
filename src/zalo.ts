@@ -15,6 +15,7 @@ export const SECRET_HEADER = "X-Bot-Api-Secret-Token"
 
 export interface ZaloApi {
   sendText(chatId: string, text: string): Promise<void>
+  sendTyping(chatId: string): Promise<void>
 }
 
 export interface ZaloClientOptions {
@@ -159,6 +160,9 @@ export function createZaloApi(options: ZaloClientOptions): ZaloApi {
       for (const chunk of chunkText(text)) {
         await zaloCall(options, "sendMessage", { chat_id: chatId, text: chunk })
       }
+    },
+    async sendTyping(chatId) {
+      await zaloCall(options, "sendChatAction", { chat_id: chatId, action: "typing" })
     },
   }
 }

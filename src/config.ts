@@ -1,3 +1,4 @@
+import { LANGUAGES, type Language } from "./messages"
 import { normalizeDir } from "./roles"
 
 export interface Config {
@@ -12,6 +13,11 @@ export interface Config {
   webhookPath: string
   stateFile: string
   turnDeadlineSeconds: number
+  progressPollSeconds: number
+  progressUpdateSeconds: number
+  progressTypingSeconds: number
+  progressAck: boolean
+  language: Language
 }
 
 export type Env = Readonly<Record<string, string | undefined>>
@@ -48,6 +54,42 @@ function positiveInt(env: Env, name: string, fallback: number, problems: string[
     return fallback
   }
   return parsed
+}
+
+function boundedInt(
+  env: Env,
+  name: string,
+  range: { fallback: number; min: number; max: number },
+  problems: string[],
+): number {
+  const raw = present(env, name)
+  if (raw === undefined) return range.fallback
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < range.min || parsed > range.max) {
+    problems.push(`${name} must be an integer from ${range.min} to ${range.max}`)
+    return range.fallback
+  }
+  return parsed
+}
+
+function flag(env: Env, name: string, fallback: boolean, problems: string[]): boolean {
+  const raw = present(env, name)?.toLowerCase()
+  if (raw === undefined) return fallback
+  if (raw === "true") return true
+  if (raw === "false") return false
+  problems.push(`${name} must be true or false`)
+  return fallback
+}
+
+function language(env: Env, name: string, problems: string[]): Language {
+  const raw = present(env, name)?.toLowerCase()
+  if (raw === undefined) return "en"
+  const match = LANGUAGES.find((candidate) => candidate === raw)
+  if (match === undefined) {
+    problems.push(`${name} must be one of ${LANGUAGES.join(", ")}`)
+    return "en"
+  }
+  return match
 }
 
 export function parseConfig(env: Env): Config {
@@ -93,6 +135,12 @@ export function parseConfig(env: Env): Config {
   const port = positiveInt(env, "PORT", 3000, problems)
   const turnDeadlineSeconds = positiveInt(env, "KANNA_TURN_DEADLINE_SECONDS", 1800, problems)
 
+  const progressPollSeconds = boundedInt(env, "PROGRESS_POLL_SECONDS", { fallback: 15, min: 5, max: 90 }, problems)
+  const progressUpdateSeconds = boundedInt(env, "PROGRESS_UPDATE_SECONDS", { fallback: 60, min: 15, max: 600 }, problems)
+  const progressTypingSeconds = boundedInt(env, "PROGRESS_TYPING_SECONDS", { fallback: 5, min: 2, max: 30 }, problems)
+  const progressAck = flag(env, "PROGRESS_ACK", true, problems)
+  const bridgeLanguage = language(env, "BRIDGE_LANGUAGE", problems)
+
   const webhookPath = present(env, "WEBHOOK_PATH") ?? "/zalo/webhook"
   if (!webhookPath.startsWith("/")) {
     problems.push("WEBHOOK_PATH must start with /")
@@ -114,5 +162,10 @@ export function parseConfig(env: Env): Config {
     webhookPath,
     stateFile: present(env, "STATE_FILE") ?? "./data/state.json",
     turnDeadlineSeconds,
+    progressPollSeconds,
+    progressUpdateSeconds,
+    progressTypingSeconds,
+    progressAck,
+    language: bridgeLanguage,
   }
 }

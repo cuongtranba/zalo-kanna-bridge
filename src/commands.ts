@@ -1,3 +1,5 @@
+import type { Messages, RoleName } from "./messages"
+
 export interface ParsedCommand {
   name: string
   rest: string
@@ -31,24 +33,7 @@ export function parseCommand(text: string): ParsedCommand | undefined {
   return { name, rest: trimmed.slice(token.length).trim() }
 }
 
-const SHARED_HELP = [
-  "/help - this list",
-  "/whoami - your role, Zalo id and directory",
-  "/new - start a fresh Kanna conversation",
-]
-
-const ADMIN_HELP = [
-  "/dir [path] - show or change your working directory",
-  "/assign <zaloId> <path> - give a user access to a directory",
-  "/unassign <zaloId> - remove a user",
-  "/users - assigned users and people who messaged the bot",
-  "/approve [zaloId] - approve a waiting tool request",
-  "/deny [zaloId] [reason] - deny a waiting request",
-  "/answer [zaloId] <text> - answer a waiting question",
-  "/mcp <tool> [json] - call any Kanna MCP tool",
-]
-
-export function helpText(role: "superadmin" | "user"): string {
-  const lines = role === "superadmin" ? [...SHARED_HELP, ...ADMIN_HELP] : SHARED_HELP
-  return `Commands:\n${lines.join("\n")}\n\nAnything else is sent to the Kanna agent.`
+export function helpText(messages: Messages, role: RoleName): string {
+  const lines = role === "superadmin" ? [...messages.helpShared, ...messages.helpAdmin] : messages.helpShared
+  return `${messages.helpHeading}\n${lines.join("\n")}\n\n${messages.helpFooter}`
 }

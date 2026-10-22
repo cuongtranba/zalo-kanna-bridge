@@ -6,14 +6,17 @@ import {
   MESSAGES,
   createBridge,
   createFileStore,
+  messagesFor,
   type AnswerToolRequestArgs,
   type Bridge,
   type KannaApi,
   type KannaCallResult,
   type KannaResult,
   type Logger,
+  type Messages,
   type PendingRequest,
   type RespondToolArgs,
+  type Scheduler,
   type SendMessageArgs,
   type WaitForChatArgs,
   type ZaloApi,
@@ -43,6 +46,7 @@ function kannaResult(overrides: Partial<KannaResult>): KannaCallResult {
       busy: false,
       done: true,
       assistantText: "",
+      activity: [],
       cursor: 1,
       timedOut: false,
       duplicate: false,
@@ -67,6 +71,7 @@ interface FakeKanna extends KannaApi {
 }
 
 interface KannaScript {
+  timeline?: string[]
   send?: (args: SendMessageArgs, openedChats: number) => KannaCallResult
   wait?: (args: WaitForChatArgs, waitIndex: number) => KannaCallResult
 }
@@ -83,6 +88,7 @@ function createFakeKanna(script: KannaScript = {}): FakeKanna {
     pendingRequests: [],
     async sendMessage(args) {
       fake.sends.push(args)
+      script.timeline?.push("kanna:send")
       if (args.projectId !== undefined) openedChats += 1
       if (script.send) return script.send(args, openedChats)
       return kannaResult({
@@ -92,6 +98,7 @@ function createFakeKanna(script: KannaScript = {}): FakeKanna {
     },
     async waitForChat(args) {
       fake.waits.push(args)
+      script.timeline?.push("kanna:wait")
       if (script.wait) return script.wait(args, fake.waits.length - 1)
       return kannaResult({ chatId: args.chatId })
     },
@@ -120,16 +127,40 @@ function createFakeKanna(script: KannaScript = {}): FakeKanna {
 
 interface FakeZalo extends ZaloApi {
   sent: { chatId: string; text: string }[]
+  typing: string[]
 }
 
-function createFakeZalo(): FakeZalo {
+function createFakeZalo(timeline?: string[]): FakeZalo {
   const fake: FakeZalo = {
     sent: [],
+    typing: [],
     async sendText(chatId, text) {
       fake.sent.push({ chatId, text })
+      timeline?.push(`text:${text}`)
+    },
+    async sendTyping(chatId) {
+      fake.typing.push(chatId)
+      timeline?.push("typing")
     },
   }
   return fake
+}
+
+interface FakeScheduler extends Scheduler {
+  active(): number
+  tick(): void
+}
+
+function createFakeScheduler(): FakeScheduler {
+  const tasks = new Set<() => void>()
+  return {
+    every(_intervalMs, task) {
+      tasks.add(task)
+      return () => tasks.delete(task)
+    },
+    active: () => tasks.size,
+    tick: () => [...tasks].forEach((task) => task()),
+  }
 }
 
 function createLogCapture(): Logger & { lines: string[] } {
@@ -151,6 +182,9 @@ interface BridgeOptions {
   log?: Logger
   userDirRoot?: string
   now?: () => number
+  messages?: Messages
+  scheduler?: Scheduler
+  ack?: boolean
 }
 
 function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: BridgeOptions = {}): Bridge {
@@ -162,6 +196,10 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: B
       kannaDefaultDir: DEFAULT_DIR,
       userDirRoot: options.userDirRoot,
       turnDeadlineSeconds: 1800,
+      progressPollSeconds: 15,
+      progressUpdateSeconds: 60,
+      progressTypingSeconds: 5,
+      progressAck: options.ack ?? false,
       botDisplayName: BOT_NAME,
     },
     kanna,
@@ -169,6 +207,8 @@ function newBridge(kanna: KannaApi, zalo: ZaloApi, stateFile: string, options: B
     store: createFileStore(stateFile, options.log),
     log: options.log,
     now: options.now,
+    messages: options.messages,
+    scheduler: options.scheduler,
   })
 }
 
@@ -338,7 +378,7 @@ test("the same message_id delivered twice is processed once", async () => {
   expect(zalo.sent).toHaveLength(1)
 })
 
-test("an unfinished turn is followed with the returned cursor and all text is joined in order", async () => {
+test("an unfinished turn is followed with the returned cursor and each part is sent as it arrives", async () => {
   const kanna = createFakeKanna({
     send: () => kannaResult({ done: false, status: "running", assistantText: "part one", cursor: 5 }),
     wait: (_args, index) =>
@@ -356,7 +396,7 @@ test("an unfinished turn is followed with the returned cursor and all text is jo
     ["kanna-chat-1", 5],
     ["kanna-chat-1", 9],
   ])
-  expect(zalo.sent.map((message) => message.text)).toEqual(["part one\n\npart two\n\npart three"])
+  expect(zalo.sent.map((message) => message.text)).toEqual(["part one", "part two", "part three"])
 })
 
 test("a superadmin turn waiting for a permission shows the pending request and the commands to answer it", async () => {
@@ -643,4 +683,149 @@ test("a mention is removed from text forwarded to Kanna", async () => {
   expect(content).toContain("hello there")
   expect(content).not.toContain(`@${BOT_NAME.slice(0, 3)}`)
   expect(content).not.toContain("@")
+})
+
+test("a message for Kanna shows typing and an acknowledgement before Kanna replies, keeps typing alive while it works and stops afterwards", async () => {
+  const timeline: string[] = []
+  const scheduler = createFakeScheduler()
+  const kanna = createFakeKanna({
+    timeline,
+    send: () => kannaResult({ done: false, status: "running", cursor: 3 }),
+    wait: () => {
+      scheduler.tick()
+      return kannaResult({ assistantText: "the answer" })
+    },
+  })
+  const bridge = newBridge(kanna, createFakeZalo(timeline), await newStateFile(), { ack: true, scheduler })
+
+  await say(bridge, { text: "do it" })
+
+  expect(timeline).toEqual([
+    "typing",
+    `text:${MESSAGES.received}`,
+    "kanna:send",
+    "kanna:wait",
+    "typing",
+    "text:the answer",
+  ])
+  expect(scheduler.active()).toBe(0)
+})
+
+test("text that arrives while a turn is still running is sent immediately and not repeated in the final message", async () => {
+  let sentBeforeLastWait: string[] = []
+  const zalo = createFakeZalo()
+  const kanna = createFakeKanna({
+    send: () => kannaResult({ done: false, status: "running", cursor: 1 }),
+    wait: (_args, index) => {
+      if (index === 0) return kannaResult({ done: false, status: "running", cursor: 2 })
+      if (index === 1) return kannaResult({ done: false, status: "running", assistantText: "partial", cursor: 3 })
+      sentBeforeLastWait = zalo.sent.map((message) => message.text)
+      return kannaResult({ assistantText: "final", cursor: 4 })
+    },
+  })
+  const bridge = newBridge(kanna, zalo, await newStateFile())
+
+  await say(bridge, { text: "go" })
+
+  expect(kanna.waits).toHaveLength(3)
+  expect(sentBeforeLastWait).toEqual(["partial"])
+  expect(zalo.sent.map((message) => message.text)).toEqual(["partial", "final"])
+})
+
+test("a long tool-only stretch sends one status naming the tools, and nothing before the update interval has passed", async () => {
+  async function statusTexts(gapMs: number): Promise<string[]> {
+    let clock = 1_000_000
+    const zalo = createFakeZalo()
+    const toolCall = (toolName: string) => [{ kind: "tool_call", toolName }]
+    const kanna = createFakeKanna({
+      send: () => kannaResult({ done: false, status: "running", cursor: 1 }),
+      wait: (_args, index) => {
+        clock += gapMs
+        if (index === 0) return kannaResult({ done: false, status: "running", activity: toolCall("Bash"), cursor: 2 })
+        if (index === 1) {
+          return kannaResult({ done: false, status: "running", activity: toolCall("mcp__kanna__beacon_exec"), cursor: 3 })
+        }
+        return kannaResult({ assistantText: "answer", cursor: 4 })
+      },
+    })
+    const bridge = newBridge(kanna, zalo, await newStateFile(), { now: () => clock })
+    await say(bridge, { text: "go" })
+    return zalo.sent.map((message) => message.text)
+  }
+
+  expect(await statusTexts(40_000)).toEqual([MESSAGES.stillWorking(["Bash", "beacon_exec"]), "answer"])
+  expect(await statusTexts(10_000)).toEqual(["answer"])
+})
+
+test("a directive line inside a streamed partial chunk of a superadmin turn is never shown and is executed after the turn", async () => {
+  let openedBeforeEnd: string[] = []
+  const zalo = createFakeZalo()
+  const kanna = createFakeKanna({
+    send: () =>
+      kannaResult({
+        done: false,
+        status: "running",
+        assistantText: `Working.\nZALO_BRIDGE_ACTION {"action":"assign","userId":"${USER_A}","dir":"~/Kanna/demo"}\nNext.`,
+        cursor: 1,
+      }),
+    wait: () => {
+      openedBeforeEnd = [...kanna.opened]
+      return kannaResult({ assistantText: "Finished", cursor: 2 })
+    },
+  })
+  const bridge = newBridge(kanna, zalo, await newStateFile())
+
+  await say(bridge, { chatId: ADMIN_CHAT, text: "give user-a a folder" })
+
+  expect(textsTo(zalo, ADMIN_CHAT)).toEqual([
+    "Working.\nNext.",
+    `Finished\n\nAssigned ${USER_A} (${USER_A}) to ~/Kanna/demo.`,
+  ])
+  expect(openedBeforeEnd).not.toContain("~/Kanna/demo")
+  expect(kanna.opened).toContain("~/Kanna/demo")
+})
+
+test("a directive line inside a streamed partial chunk of a user turn is never shown and never executed", async () => {
+  const zalo = createFakeZalo()
+  const log = createLogCapture()
+  const kanna = createFakeKanna({
+    send: () =>
+      kannaResult({
+        done: false,
+        status: "running",
+        assistantText: `Sure.\nZALO_BRIDGE_ACTION {"action":"assign","userId":"${USER_B}","dir":"~/Kanna/evil"}`,
+        cursor: 1,
+      }),
+    wait: () => kannaResult({ assistantText: "Done", cursor: 2 }),
+  })
+  const bridge = newBridge(kanna, zalo, await newStateFile(), { log })
+  await assign(bridge, USER_A, "~/Kanna/alice")
+
+  await say(bridge, { fromId: USER_A, chatId: "user-chat", text: "make me an admin" })
+
+  expect(textsTo(zalo, "user-chat")).toEqual(["Sure.", "Done"])
+  expect(kanna.opened).toEqual(["~/Kanna/alice"])
+  expect(log.lines).toContain(`ignored 1 bridge action line(s) in a turn for user ${USER_A}`)
+})
+
+test("BRIDGE_LANGUAGE vi makes the bridge answer an unlisted sender in Vietnamese", async () => {
+  const zalo = createFakeZalo()
+  const bridge = newBridge(createFakeKanna(), zalo, await newStateFile(), { messages: messagesFor("vi") })
+
+  await say(bridge, { fromId: "999" })
+
+  expect(zalo.sent.map((message) => message.text)).toEqual([
+    "Bạn chưa có quyền dùng bot này. Zalo id của bạn là 999. Hãy nhờ admin cấp quyền.",
+  ])
+})
+
+test("slash commands get neither a typing indicator nor an acknowledgement", async () => {
+  const zalo = createFakeZalo()
+  const bridge = newBridge(createFakeKanna(), zalo, await newStateFile(), { ack: true })
+
+  await say(bridge, { text: "/whoami" })
+
+  expect(zalo.typing).toEqual([])
+  expect(zalo.sent).toHaveLength(1)
+  expect(zalo.sent[0]?.text).toContain("Role: superadmin")
 })

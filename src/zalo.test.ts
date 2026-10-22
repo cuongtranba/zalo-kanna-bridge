@@ -23,18 +23,36 @@ function isSendBody(value: unknown): value is SendBody {
   )
 }
 
+function isActionBody(value: unknown): value is { chat_id: string; action: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "chat_id" in value &&
+    typeof value.chat_id === "string" &&
+    "action" in value &&
+    typeof value.action === "string"
+  )
+}
+
 interface FakeZaloServer {
   baseUrl: string
   requests: { path: string; body: SendBody }[]
+  actions: { path: string; body: { chat_id: string; action: string } }[]
   stop(): Promise<void>
 }
 
 function startFakeZaloServer(): FakeZaloServer {
   const requests: FakeZaloServer["requests"] = []
+  const actions: FakeZaloServer["actions"] = []
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
       const body: unknown = await request.json()
+      const path = new URL(request.url).pathname
+      if (path.endsWith("/sendChatAction") && isActionBody(body)) {
+        actions.push({ path, body })
+        return Response.json({ ok: true })
+      }
       if (!isSendBody(body)) return Response.json({ ok: false, description: "bad body" }, { status: 400 })
       requests.push({ path: new URL(request.url).pathname, body })
       return Response.json({ ok: true, result: { message_id: "out-1" } })
@@ -43,6 +61,7 @@ function startFakeZaloServer(): FakeZaloServer {
   return {
     baseUrl: `http://localhost:${server.port}`,
     requests,
+    actions,
     stop: () => server.stop(true),
   }
 }
@@ -72,6 +91,7 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
           busy: false,
           done: true,
           assistantText: reply,
+          activity: [],
           cursor: 1,
           timedOut: false,
           duplicate: false,
@@ -108,6 +128,10 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
         superadminIds: new Set(["user-1"]),
         kannaDefaultDir: "/tmp/project-1",
         turnDeadlineSeconds: 1800,
+        progressPollSeconds: 15,
+        progressUpdateSeconds: 60,
+        progressTypingSeconds: 5,
+        progressAck: false,
       },
       kanna,
       zalo: createZaloApi({ token: TOKEN, baseUrl: server.baseUrl }),
@@ -139,6 +163,7 @@ test("a 4500-character reply reaches Zalo as ordered chunks of at most 2000 char
   }
 
   const chunks = server.requests.map((request) => request.body.text)
+  expect(server.actions).toEqual([{ path: `/bot${TOKEN}/sendChatAction`, body: { chat_id: "zalo-chat-1", action: "typing" } }])
   expect(reply.length).toBeGreaterThan(4500)
   expect(chunks.length).toBeGreaterThan(2)
   expect(chunks.every((chunk) => chunk.length <= 2000)).toBe(true)

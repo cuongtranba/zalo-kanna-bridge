@@ -49,6 +49,11 @@ All configuration is through environment variables, validated at startup. The br
 | `WEBHOOK_PATH` | no | `/zalo/webhook` | Path Zalo posts to. |
 | `STATE_FILE` | no | `./data/state.json` | Where conversations, users and assignments are stored. |
 | `KANNA_TURN_DEADLINE_SECONDS` | no | `1800` | How long to follow one turn before telling the user to check Kanna. |
+| `BRIDGE_LANGUAGE` | no | `en` | Language of every message the bridge itself sends: `en` or `vi`. Anything else is a startup error. The text sent to the Kanna agent stays English. |
+| `PROGRESS_ACK` | no | `true` | Send an acknowledgement ("Got it, working on it…") as soon as a message is accepted for Kanna. `true` or `false`. |
+| `PROGRESS_POLL_SECONDS` | no | `15` | How long each call to Kanna waits (5–90) before the bridge looks at progress again. |
+| `PROGRESS_UPDATE_SECONDS` | no | `60` | Send a "Still working…" status when nothing has been sent to the user for this long (15–600). |
+| `PROGRESS_TYPING_SECONDS` | no | `5` | How often the typing indicator is refreshed while Kanna works (2–30). |
 
 Copy `.env.example` to `.env` for local use. Never commit it.
 
@@ -93,6 +98,18 @@ ZALO_BOT_TOKEN=... ZALO_WEBHOOK_SECRET=... \
 ```
 
 The script calls `setWebhook` and prints Zalo's `verification` result. It never prints the token. The secret must be the same value as `ZALO_WEBHOOK_SECRET` on the running service.
+
+## Progress feedback
+
+A Kanna turn can take minutes, so for every message that goes to Kanna (not slash commands, not unknown senders) the bridge shows that it is alive:
+
+1. It sends Zalo's `typing` chat action and then the acknowledgement, and refreshes the typing indicator every `PROGRESS_TYPING_SECONDS` until the turn ends.
+2. It follows the turn in slices of `PROGRESS_POLL_SECONDS`. Text Kanna has written so far is sent to Zalo as soon as it arrives, so a long answer shows up in pieces. If a slice brings no text and nothing has been sent for `PROGRESS_UPDATE_SECONDS`, it sends a status such as `Still working… (Bash, Read)`, naming up to five tools Kanna used (the `mcp__<server>__` prefix is dropped).
+3. The last text, the waiting-for-approval notice or the failure/deadline message comes last. A turn that sent no answer text at all still gets the "finished without a text reply" message.
+
+`/approve`, `/deny` and `/answer` resume a waiting turn with the same typing, streaming and status behaviour, but no acknowledgement. A failed typing action or acknowledgement is logged and never stops the turn.
+
+`ZALO_BRIDGE_ACTION` lines are removed from every piece before it is sent. They are run, for superadmin turns only, after the turn ends, and their confirmations are appended to the last message.
 
 ## Roles
 
@@ -146,7 +163,7 @@ Superadmin messages carry a short bridge preamble telling the agent it may manag
 ZALO_BRIDGE_ACTION {"action":"assign","userId":"<zaloId>","dir":"<absolute path>"}
 ```
 
-Supported actions are `assign {userId, dir}`, `unassign {userId}` and `set_dir {dir}`. The bridge removes these lines from the reply, runs them only when the turn belongs to a superadmin, and appends a confirmation or error for each. The same lines in a user's turn are removed, ignored and logged. This uses no extra Kanna tool.
+Supported actions are `assign {userId, dir}`, `unassign {userId}` and `set_dir {dir}`. The bridge removes these lines from every part of the reply, runs them once the turn has ended and only when it belongs to a superadmin, and appends a confirmation or error for each to the last message. The same lines in a user's turn are removed, ignored and logged. This uses no extra Kanna tool.
 
 ## Security notes
 
@@ -164,6 +181,7 @@ Supported actions are `assign {userId, dir}`, `unassign {userId}` and `set_dir {
 - Text messages only. Images, stickers and voice get a "not supported" reply.
 - Replies longer than 2000 characters are split into several messages (Zalo's limit), preferring newline or space boundaries. `/mcp` output is cut at about 6000 characters.
 - Updates arrive by webhook only; `getUpdates` polling is not used.
+- A `ZALO_BRIDGE_ACTION` line is only recognised when it arrives whole inside one piece of Kanna text; a line split across two pieces would not be stripped.
 - Replies are plain text; Zalo markdown or HTML rendering is not used.
 - State (conversations, users, assignments, who messaged the bot) lives in a single JSON file, so run one instance. An old version 1 state file is migrated on start; its conversations are dropped, so each person starts a fresh Kanna chat.
 - `/approve <zaloId>` needs the bridge to have seen that user's waiting turn since it started. After a restart, answer in Kanna.
