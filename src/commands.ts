@@ -7,6 +7,7 @@ export interface ParsedCommand {
 
 export const ADMIN_COMMANDS: ReadonlySet<string> = new Set([
   "dir",
+  "auto",
   "assign",
   "unassign",
   "users",

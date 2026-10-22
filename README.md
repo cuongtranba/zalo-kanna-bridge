@@ -43,7 +43,7 @@ All configuration is through environment variables, validated at startup. The br
 | `KANNA_MCP_URL` | yes | | Kanna remote MCP endpoint, e.g. `https://kanna.example.com/mcp`. |
 | `KANNA_PASSWORD` | yes | | Kanna password, sent as `Authorization: Bearer`. |
 | `ZALO_SUPERADMIN_IDS` | yes | | Comma-separated Zalo user ids with full control. Must not be empty. Replaces `ZALO_ALLOWED_USER_IDS`. |
-| `KANNA_DEFAULT_DIR` | yes | | Directory superadmins start in, absolute (`/...`) or `~/...`. Kanna opens it as a project (and creates it if missing). Replaces `KANNA_PROJECT_ID`. |
+| `KANNA_DEFAULT_DIR` | yes | | Directory superadmins start in, absolute (`/...`) or `~/...`. Kanna opens it as a project (and creates it if missing). It is also where the project router runs and the fallback when no project fits. Replaces `KANNA_PROJECT_ID`. |
 | `ZALO_USER_DIR_ROOT` | no | | When set, `/assign` and the admin `assign` action only accept directories at or below this path. Superadmins' own `/dir` is not restricted. |
 | `PORT` | no | `3000` | HTTP port. |
 | `WEBHOOK_PATH` | no | `/zalo/webhook` | Path Zalo posts to. |
@@ -55,6 +55,9 @@ All configuration is through environment variables, validated at startup. The br
 | `PROGRESS_UPDATE_SECONDS` | no | `60` | Send a "Still working…" status when nothing has been sent to the user for this long (15–600). |
 | `PROGRESS_TYPING_SECONDS` | no | `5` | How often the typing indicator is refreshed while Kanna works (2–30). |
 | `SESSION_IDLE_MINUTES` | no | `30` | A person who has not been active in their Kanna conversation for this many minutes (0–10080) gets a new conversation on their next message. `0` turns this off. See "Idle sessions". |
+| `ROUTER_ENABLED` | no | `true` | Let Kanna pick the project for a superadmin's new session. `true` or `false`. See "Project routing". |
+| `ROUTER_MODEL` | no | `haiku` | Kanna model alias used for the routing question. Any non-empty string Kanna accepts. |
+| `ROUTER_TIMEOUT_SECONDS` | no | `60` | How long to wait for the routing answer (10–300) before falling back to the default directory. |
 
 Copy `.env.example` to `.env` for local use. Never commit it.
 
@@ -121,13 +124,33 @@ Each person keeps one Kanna conversation per Zalo chat until they send `/new` or
 - Slash commands do not refresh or reset the timer (except `/new`, which starts a new conversation). A conversation that is waiting for `/approve`, `/deny` or `/answer` is never reset for being idle.
 - The very first message that opens a person's conversation (none stored yet) has a short `/new` tip appended to the acknowledgement, so the tip is not sent when `PROGRESS_ACK` is `false`.
 
+## Project routing
+
+A superadmin's sessions used to always open in their current directory, so a question about another project ran without that project's `CLAUDE.md`. Now, when a superadmin's message would **start** a new Kanna conversation (nothing stored yet, after `/new`, after the idle gap, after `/auto`), the bridge asks Kanna which project it belongs to:
+
+1. It calls Kanna's `list_projects`.
+2. It sends one short question to `ROUTER_MODEL` (default `haiku`) in the project of `KANNA_DEFAULT_DIR`: the list as `- <projectId> | <title> | <localPath>` (at most 200 lines) plus the message, asking for one line of JSON, `{"projectId":"<id>"}` or `{"projectId":null}`, and no tools.
+3. It accepts only a `projectId` that was in the list. A null, unparsable, unknown, failed or timed-out answer falls back to the `KANNA_DEFAULT_DIR` project. The log records the chosen project title or the fallback reason, never the message text.
+4. It archives the routing chat in Kanna so it does not fill the sidebar, then opens the real conversation in the chosen project.
+
+The user is told where the session opened, in the acknowledgement: `Received, opening a session in <title>…` (vi: `Đã nhận, mở phiên trong dự án <title>…`). That line is sent even when `PROGRESS_ACK` is `false`, because it is information; the idle-reset notice is kept and sent first.
+
+Rules:
+
+- Only superadmins are routed. Assigned users always use their assigned directory and never trigger `list_projects`.
+- Follow-ups inside a session stay in that session's project; the router runs once per session.
+- `/dir <path>` is an explicit choice: it turns routing off for that superadmin and the directory is used as before (the `set_dir` action does the same). `/auto` clears it, starts a new conversation and turns routing back on. `/dir` with no argument shows `auto (...)` or the directory, and `/whoami` shows the same.
+- `#<project title> <message>` opens the session in the project whose Kanna title matches exactly (case-insensitive; the longest title wins) and removes the `#title` token from the text Kanna receives. It skips the router, works even after `/dir` and with `ROUTER_ENABLED=false`, and needs some text after the title. In an existing session it only starts a new one if the project differs.
+- `ROUTER_ENABLED=false` restores the old behaviour: always the current directory.
+- Existing state: an `admins[id].dir` saved before this feature that equals `KANNA_DEFAULT_DIR` counts as not explicit (auto). Any other saved `dir` stays explicit. `/dir` now stores `dirExplicit: true`, so a deliberate `/dir` to the default directory pins it.
+
 ## Roles
 
 The bot decides who is talking from the sender's Zalo id.
 
 | Sender | Messages go to | Commands |
 | --- | --- | --- |
-| Superadmin (`ZALO_SUPERADMIN_IDS`) | Their current directory (starts at `KANNA_DEFAULT_DIR`) | All of them |
+| Superadmin (`ZALO_SUPERADMIN_IDS`) | A project Kanna picks per new session ("Project routing"), or the directory they chose with `/dir` | All of them |
 | Assigned user | Only the directory a superadmin assigned | `/help`, `/whoami`, `/new` |
 | Anyone else | Nothing | Gets "You don't have access to this bot yet. Your Zalo id is `<id>`" at most once per 24 hours |
 
@@ -152,7 +175,9 @@ Commands are matched on the first word, case-insensitively, and handled by the b
 | `/help` | everyone | Lists the commands available to you. |
 | `/whoami` | everyone | Shows your role, Zalo id and directory. |
 | `/new` | everyone | Starts a fresh Kanna conversation. |
-| `/dir [path]` | superadmin | Shows or changes your own directory. Kanna creates it if missing. |
+| `/dir [path]` | superadmin | Shows or changes your own directory. Kanna creates it if missing. Setting one turns project routing off. |
+| `/auto` | superadmin | Clears your `/dir`, starts a new conversation and lets Kanna pick the project for each new session again. |
+| `#<project> <message>` | superadmin | Opens the session in the Kanna project with that title (not a command; see "Project routing"). |
 | `/assign <zaloId> <path>` | superadmin | Gives a user access to one directory. Fails if Kanna cannot open it or it is outside `ZALO_USER_DIR_ROOT`. |
 | `/unassign <zaloId>` | superadmin | Removes a user. |
 | `/users` | superadmin | Lists assigned users and people who messaged the bot but are not assigned. |

@@ -18,14 +18,17 @@ export interface AdminOps {
   assign(adminId: string, userId: string, dirInput: string): Promise<OpResult>
   unassign(userId: string): Promise<OpResult>
   setDir(adminId: string, dirInput: string): Promise<OpResult>
+  clearDir(adminId: string): Promise<OpResult>
   currentDir(adminId: string): string
+  explicitDir(adminId: string): string | undefined
+  describeDir(adminId: string): string
   workspaceFor(role: "superadmin" | "user", zaloId: string): Promise<KannaOutcome<Workspace>>
   describeUsers(): string
   knownUsers(limit: number): string
 }
 
 export interface AdminOpsDeps {
-  config: Pick<BridgeConfig, "superadminIds" | "kannaDefaultDir" | "userDirRoot">
+  config: Pick<BridgeConfig, "superadminIds" | "kannaDefaultDir" | "userDirRoot" | "routerEnabled">
   kanna: KannaApi
   messages: Messages
   store: BridgeStore
@@ -52,8 +55,13 @@ export function createAdminOps(deps: AdminOpsDeps): AdminOps {
       .sort((a, b) => b[1].lastSeen - a[1].lastSeen)
   }
 
+  function explicitDir(adminId: string): string | undefined {
+    const { dir, dirExplicit } = store.getAdmin(adminId)
+    return (dirExplicit ?? dir !== config.kannaDefaultDir) ? dir : undefined
+  }
+
   function currentDir(adminId: string): string {
-    return store.getAdmin(adminId).dir ?? config.kannaDefaultDir
+    return explicitDir(adminId) ?? config.kannaDefaultDir
   }
 
   async function workspaceForAdmin(adminId: string): Promise<KannaOutcome<Workspace>> {
@@ -70,6 +78,12 @@ export function createAdminOps(deps: AdminOpsDeps): AdminOps {
 
   return {
     currentDir,
+    explicitDir,
+    describeDir(adminId) {
+      const explicit = explicitDir(adminId)
+      if (explicit !== undefined) return explicit
+      return config.routerEnabled ? messages.autoMode(config.kannaDefaultDir) : config.kannaDefaultDir
+    },
     async workspaceFor(role, zaloId) {
       if (role === "superadmin") return workspaceForAdmin(zaloId)
       const user = store.getUser(zaloId)
@@ -101,8 +115,13 @@ export function createAdminOps(deps: AdminOpsDeps): AdminOps {
       if (dir === undefined) return fail(messages.dirHelp)
       const opened = await kanna.openProject(dir)
       if (!opened.ok) return fail(messages.couldNotOpen(dir, opened.error))
-      await store.updateAdmin(adminId, { dir, projectDir: dir, projectId: opened.value })
+      await store.updateAdmin(adminId, { dir, dirExplicit: true, projectDir: dir, projectId: opened.value })
       return { ok: true, text: messages.dirChanged(dir) }
+    },
+    async clearDir(adminId) {
+      await store.updateAdmin(adminId, { dir: undefined, dirExplicit: undefined })
+      const text = config.routerEnabled ? messages.backToAuto(config.kannaDefaultDir) : messages.dirChanged(config.kannaDefaultDir)
+      return { ok: true, text }
     },
     describeUsers() {
       const assigned = store.listUsers().map(([id, user]) => `- ${user.name} (${id}) -> ${user.dir}`)

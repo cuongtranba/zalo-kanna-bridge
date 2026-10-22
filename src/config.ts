@@ -18,6 +18,9 @@ export interface Config {
   progressTypingSeconds: number
   progressAck: boolean
   sessionIdleMinutes: number
+  routerEnabled: boolean
+  routerModel: string
+  routerTimeoutSeconds: number
   language: Language
 }
 
@@ -141,6 +144,9 @@ export function parseConfig(env: Env): Config {
   const progressTypingSeconds = boundedInt(env, "PROGRESS_TYPING_SECONDS", { fallback: 5, min: 2, max: 30 }, problems)
   const progressAck = flag(env, "PROGRESS_ACK", true, problems)
   const sessionIdleMinutes = boundedInt(env, "SESSION_IDLE_MINUTES", { fallback: 30, min: 0, max: 10080 }, problems)
+  const routerEnabled = flag(env, "ROUTER_ENABLED", true, problems)
+  const routerModel = present(env, "ROUTER_MODEL") ?? "haiku"
+  const routerTimeoutSeconds = boundedInt(env, "ROUTER_TIMEOUT_SECONDS", { fallback: 60, min: 10, max: 300 }, problems)
   const bridgeLanguage = language(env, "BRIDGE_LANGUAGE", problems)
 
   const webhookPath = present(env, "WEBHOOK_PATH") ?? "/zalo/webhook"
@@ -169,6 +175,9 @@ export function parseConfig(env: Env): Config {
     progressTypingSeconds,
     progressAck,
     sessionIdleMinutes,
+    routerEnabled,
+    routerModel,
+    routerTimeoutSeconds,
     language: bridgeLanguage,
   }
 }
