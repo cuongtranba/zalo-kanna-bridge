@@ -1,5 +1,5 @@
 import type { Config } from "./config"
-import { errorMessage, parseJson } from "./json"
+import { errorMessage, isJsonObject, parseJson } from "./json"
 import type { KannaApi, KannaResult } from "./kanna"
 import type { ChatMap } from "./state"
 import { SECRET_HEADER, TEXT_EVENT, isKnownEvent, parseUpdate, verifySecret, type ZaloApi, type ZaloUpdate } from "./zalo"
@@ -169,7 +169,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   function handleUpdate(update: ZaloUpdate): void {
     const { message, eventName } = update
-    if (!isKnownEvent(eventName)) return
+    if (!isKnownEvent(eventName)) {
+      log.info(`ignored webhook with unknown event ${eventName}`)
+      return
+    }
     if (!config.allowedUserIds.has(message.fromId)) {
       log.info(`ignored message from unlisted user id ${message.fromId} (${message.displayName})`)
       return
@@ -205,7 +208,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
       if (body === undefined) return new Response("invalid JSON", { status: 400 })
       try {
         const update = parseUpdate(body)
-        if (update !== undefined) handleUpdate(update)
+        if (update === undefined) {
+          const keys = isJsonObject(body) ? Object.keys(body).join(", ") : typeof body
+          log.info(`ignored webhook body with an unrecognized shape; top-level keys: ${keys}`)
+        } else {
+          handleUpdate(update)
+        }
       } catch (error) {
         log.error(`failed to accept webhook update: ${errorMessage(error)}`)
       }
